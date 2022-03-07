@@ -149,6 +149,12 @@ func (v *version) Pods() PodInformer {
 	return &podInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
+type podInformer struct {
+	factory          internalinterfaces.SharedInformerFactory
+	tweakListOptions internalinterfaces.TweakListOptionsFunc
+	namespace        string
+}
+
 // PodInformer provides access to a shared informer and lister for Pods.
 type PodInformer interface {
 	Informer() cache.SharedIndexInformer
@@ -156,8 +162,18 @@ type PodInformer interface {
 }
 ```
 
+PodInformer一般倾向于使用factory创建一个共享的informer以节省资源，如podInformer.Informer().HasSynced
 NewPodInformer实际调用的是NewFilteredPodInformer，使用factory共用的client建立List&Watch，以及Watch的对象类型Pod，
 ```Golang
+
+func (f *podInformer) Informer() cache.SharedIndexInformer {
+	return f.factory.InformerFor(&corev1.Pod{}, f.defaultInformer)
+}
+
+func (f *podInformer) Lister() v1.PodLister {
+	return v1.NewPodLister(f.Informer().GetIndexer())
+}
+
 // NewFilteredPodInformer constructs a new informer for Pod type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
