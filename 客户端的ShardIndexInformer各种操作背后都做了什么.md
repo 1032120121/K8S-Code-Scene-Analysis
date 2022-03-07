@@ -165,10 +165,11 @@ type PodInformer interface {
 PodInformer有两种创建方法：<br/>
 	1. 使用factory创建，如podInformer.Informer().HasSynced。一般倾向于这种共享的informer以节省资源;<br/>
 	2. 直接调用NewPodInformer创建；<br/>
-无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod。defaultInformer默认创建namepsace索引**cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}**。lister返回的就是这个内存索引中的数据，如f.Informer().GetIndexer()
+无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod。defaultInformer默认只给出namepsace的索引函数**cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}**。lister返回的就是这个内存索引中的数据，如f.Informer().GetIndexer()
 ```Golang
 
 func (f *podInformer) defaultInformer(client kubernetes.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+        // 默认只给出namepsace的索引函数
 	return NewFilteredPodInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
@@ -177,6 +178,7 @@ func (f *podInformer) Informer() cache.SharedIndexInformer {
 }
 
 func (f *podInformer) Lister() v1.PodLister {
+        // 返回的数据来自于本地索引，如f.Informer().GetIndexer()
 	return v1.NewPodLister(f.Informer().GetIndexer())
 }
 
@@ -207,6 +209,26 @@ func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyn
 		resyncPeriod,
 		indexers,
 	)
+}
+
+func NewSharedIndexInformer(lw ListerWatcher, objType runtime.Object, defaultEventHandlerResyncPeriod time.Duration, indexers Indexers) SharedIndexInformer {
+	// xxx
+	sharedIndexInformer := &sharedIndexInformer{
+	        // 传递的是索引构建函数indexers，如上面的namespace索引函数
+		indexer:                         NewIndexer(DeletionHandlingMetaNamespaceKeyFunc, indexers),
+		listerWatcher:                   lw,
+		// xxx
+	}
+	return sharedIndexInformer
+}
+
+// NewIndexer returns an Indexer implemented simply with a map and a lock.
+func NewIndexer(keyFunc KeyFunc, indexers Indexers) Indexer {
+	return &cache{
+	        // 新建索引Indices{}
+		cacheStorage: NewThreadSafeStore(indexers, Indices{}),
+		keyFunc:      keyFunc,
+	}
 }
 ```
 
