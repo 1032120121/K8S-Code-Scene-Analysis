@@ -162,9 +162,15 @@ type PodInformer interface {
 }
 ```
 
-PodInformer一般倾向于使用factory创建一个共享的informer以节省资源，如podInformer.Informer().HasSynced
-NewPodInformer实际调用的是NewFilteredPodInformer，使用factory共用的client建立List&Watch，以及Watch的对象类型Pod，
+PodInformer有两种创建方法：<br/>
+	1. 使用factory创建，如podInformer.Informer().HasSynced。一般倾向于这种共享的informer以节省资源;<br/>
+	2. 直接调用NewPodInformer创建；<br/>
+无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod，
 ```Golang
+
+func (f *podInformer) defaultInformer(client kubernetes.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+	return NewFilteredPodInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+}
 
 func (f *podInformer) Informer() cache.SharedIndexInformer {
 	return f.factory.InformerFor(&corev1.Pod{}, f.defaultInformer)
@@ -174,9 +180,13 @@ func (f *podInformer) Lister() v1.PodLister {
 	return v1.NewPodLister(f.Informer().GetIndexer())
 }
 
-// NewFilteredPodInformer constructs a new informer for Pod type.
+// NewPodInformer constructs a new informer for Pod type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+func NewPodInformer(client kubernetes.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
+	return NewFilteredPodInformer(client, namespace, resyncPeriod, indexers, nil)
+}
+
 func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
@@ -199,6 +209,31 @@ func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyn
 	)
 }
 ```
-PodInformer
-f.factory.InformerFor(&corev1.Pod{}, f.defaultInformer)
+
+通过factory.InformerFor创建，所有informer共用的一条client连接，而且相同informerType的informer避免重复创建，这也体现sharedInformer的含义
+```Golang
+// InternalInformerFor returns the SharedIndexInformer for obj using an internal
+// client.
+func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internalinterfaces.NewInformerFunc) cache.SharedIndexInformer {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+
+	informerType := reflect.TypeOf(obj)
+	informer, exists := f.informers[informerType]
+	if exists {
+	        // 已经存在同类型的informer就返回
+		return informer
+	}
+
+	resyncPeriod, exists := f.customResync[informerType]
+	if !exists {
+		resyncPeriod = f.defaultResync
+	}
+
+	informer = newFunc(f.client, resyncPeriod)
+	f.informers[informerType] = informer
+
+	return informer
+}
+```
 
