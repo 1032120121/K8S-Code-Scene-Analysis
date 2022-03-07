@@ -210,7 +210,7 @@ func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyn
 }
 ```
 
-通过factory.InformerFor创建，所有informer共用的一条client连接，而且相同informerType的informer避免重复创建，这也体现sharedInformer的含义
+通过factory.InformerFor创建，所有informer共用一条client连接，而且相同informerType的informer避免重复创建，这也体现sharedInformer的含义。defaultInformer默认创建namepsace索引**cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}**
 ```Golang
 // InternalInformerFor returns the SharedIndexInformer for obj using an internal
 // client.
@@ -234,6 +234,43 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 	f.informers[informerType] = informer
 
 	return informer
+}
+```
+
+```Golang
+type SharedInformer interface {
+	// AddEventHandler adds an event handler to the shared informer using the shared informer's resync
+	// period.  Events to a single handler are delivered sequentially, but there is no coordination
+	// between different handlers.
+	AddEventHandler(handler ResourceEventHandler)
+	// AddEventHandlerWithResyncPeriod adds an event handler to the
+	// shared informer using the specified resync period.  The resync
+	// operation consists of delivering to the handler a create
+	// notification for every object in the informer's local cache; it
+	// does not add any interactions with the authoritative storage.
+	AddEventHandlerWithResyncPeriod(handler ResourceEventHandler, resyncPeriod time.Duration)
+	// GetStore returns the informer's local cache as a Store.
+	GetStore() Store
+	// GetController gives back a synthetic interface that "votes" to start the informer
+	GetController() Controller
+	// Run starts and runs the shared informer, returning after it stops.
+	// The informer will be stopped when stopCh is closed.
+	Run(stopCh <-chan struct{})
+	// HasSynced returns true if the shared informer's store has been
+	// informed by at least one full LIST of the authoritative state
+	// of the informer's object collection.  This is unrelated to "resync".
+	HasSynced() bool
+	// LastSyncResourceVersion is the resource version observed when last synced with the underlying
+	// store. The value returned is not synchronized with access to the underlying store and is not
+	// thread-safe.
+	LastSyncResourceVersion() string
+}
+// SharedIndexInformer provides add and get Indexers ability based on SharedInformer.
+type SharedIndexInformer interface {
+	SharedInformer
+	// AddIndexers add indexers to the informer before it starts.
+	AddIndexers(indexers Indexers) error
+	GetIndexer() Indexer
 }
 ```
 
