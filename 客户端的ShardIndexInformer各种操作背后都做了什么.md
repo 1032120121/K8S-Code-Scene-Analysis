@@ -31,7 +31,8 @@ if !cache.WaitForCacheSync(stopCh, c.podListerSynced) {
 go ctx.InformerFactory.Start(ctx.StopCh)
 ```
 
-# SharedInformerFactory创建
+# 关键实现
+## 创建SharedInformerFactory
 
 创建sharedInformerFactory对象，注意默认是all namespaces。
 ```Golang
@@ -90,6 +91,7 @@ func WithNamespace(namespace string) SharedInformerOption {
 
 ```
 
+## 创建PodInformer
 SharedInformerFactory除了是对外的接口，还有个同名内部接口。PodInformer是通过Core->V1->Pods一层一层最终创建出来的
 ```Golang
 // SharedInformerFactory provides shared informers for resources in all known
