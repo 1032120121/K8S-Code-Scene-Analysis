@@ -165,7 +165,7 @@ type PodInformer interface {
 PodInformer有两种创建方法：<br/>
 	1. 使用factory创建，如podInformer.Informer().HasSynced。一般倾向于这种共享的informer以节省资源;<br/>
 	2. 直接调用NewPodInformer创建；<br/>
-无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod，
+无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod。defaultInformer默认创建namepsace索引**cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}**。lister返回的就是这个内存索引中的数据，如f.Informer().GetIndexer()
 ```Golang
 
 func (f *podInformer) defaultInformer(client kubernetes.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
@@ -210,7 +210,7 @@ func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyn
 }
 ```
 
-通过factory.InformerFor创建，所有informer共用一条client连接，而且相同informerType的informer避免重复创建，这也体现sharedInformer的含义。defaultInformer默认创建namepsace索引**cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}**
+通过factory.InformerFor创建，所有informer共用一条client连接，而且相同informerType的informer避免重复创建，这也体现sharedInformer的含义
 ```Golang
 // InternalInformerFor returns the SharedIndexInformer for obj using an internal
 // client.
