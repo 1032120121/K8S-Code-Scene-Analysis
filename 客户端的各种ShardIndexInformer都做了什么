@@ -1,4 +1,5 @@
 # 客户端Informer的一般用法
+
 ```golang
 var ( 
     kubeClient kubernetes.Interface = xxx
@@ -6,6 +7,9 @@ var (
     informerFactory informers.SharedInformerFactory
 )
 informerFactory = kubeinformers.NewSharedInformerFactory(kubeClient, defaultResync)
+```
+
+
 ...
 var (
     podInformer corev1.PodInformer
@@ -26,3 +30,5 @@ if !cache.WaitForCacheSync(stopCh, c.podListerSynced) {
 ...
 go ctx.InformerFactory.Start(ctx.StopCh)
 ```
+
+https://github.com/1032120121/containerd/blob/a1c88e195aa98e5fcd9bf42294caf0bbf7a543ae/filters/parser.go#L51-L57
