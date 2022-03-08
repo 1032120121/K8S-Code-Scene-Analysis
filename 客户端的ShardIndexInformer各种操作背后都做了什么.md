@@ -163,7 +163,7 @@ type PodInformer interface {
 ```
 
 PodInformer有两种创建方法：<br/>
-	1. 使用factory创建，如podInformer.Informer().HasSynced。一般倾向于这种共享的informer以节省资源;<br/>
+	1. 使用factory创建，如podInformer.Informer()。一般倾向于这种共享的informer以节省资源;<br/>
 	2. 直接调用NewPodInformer创建；<br/>
 无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod。defaultInformer默认只给出namepsace的索引函数**cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}**。lister返回的就是这个内存索引中的数据，如f.Informer().GetIndexer()
 ```Golang
@@ -260,6 +260,7 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 ```
 
 ## 启动Informer机制
+
 ```Golang
 func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 	fifo := NewDeltaFIFO(MetaNamespaceKeyFunc, s.indexer)
@@ -268,7 +269,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 		Queue:            fifo,
 		ListerWatcher:    s.listerWatcher,
 		// XXX
-                // 从DeltaFIFO pop出来的数据处理函数
+                // 为从DeltaFIFO pop出来的数据设置处理函数
 		Process: s.HandleDeltas,
 	}
 	
@@ -311,7 +312,7 @@ func (c *controller) Run(stopCh <-chan struct{}) {
 
 func (c *controller) processLoop() {
 	for {
-	        // 周期性的从DeltaFIFO中pop变更事件，事件处理函数就是Handle
+	        // 周期性的从DeltaFIFO中pop变更事件，事件处理函数就是HandleDeltas
 		obj, err := c.config.Queue.Pop(PopProcessFunc(c.config.Process))
 		if err != nil {
 			if err == ErrFIFOClosed {
@@ -325,7 +326,19 @@ func (c *controller) processLoop() {
 		}
 	}
 }
+```
 
+podInformer.Informer()返回的还是cache.SharedIndexInformer接口，podInformer.Informer().HasSynced其实是controller.HasSynced，最终是看DeltaFIFO这个Queue是否同步完成，
+
+```Golang
+func (s *sharedIndexInformer) HasSynced() bool {
+	// XXX
+	return s.controller.HasSynced()
+}
+
+func (c *controller) HasSynced() bool {
+	return c.config.Queue.HasSynced()
+}
 ```
 
 ## 变更事件响应和客户端回调
@@ -333,6 +346,37 @@ func (c *controller) processLoop() {
 HandleDeltas
 
 ```Golang
+func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
+	s.blockDeltas.Lock()
+	defer s.blockDeltas.Unlock()
+
+	// from oldest to newest
+	for _, d := range obj.(Deltas) {
+		switch d.Type {
+		case Sync, Added, Updated:
+			isSync := d.Type == Sync
+			s.cacheMutationDetector.AddObject(d.Object)
+			if old, exists, err := s.indexer.Get(d.Object); err == nil && exists {
+				if err := s.indexer.Update(d.Object); err != nil {
+					return err
+				}
+				s.processor.distribute(updateNotification{oldObj: old, newObj: d.Object}, isSync)
+			} else {
+				if err := s.indexer.Add(d.Object); err != nil {
+					return err
+				}
+				s.processor.distribute(addNotification{newObj: d.Object}, isSync)
+			}
+		case Deleted:
+			if err := s.indexer.Delete(d.Object); err != nil {
+				return err
+			}
+			s.processor.distribute(deleteNotification{oldObj: d.Object}, false)
+		}
+	}
+	return nil
+}
+
 type SharedInformer interface {
 	// AddEventHandler adds an event handler to the shared informer using the shared informer's resync
 	// period.  Events to a single handler are delivered sequentially, but there is no coordination
