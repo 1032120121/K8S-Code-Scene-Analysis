@@ -507,3 +507,6 @@ func (p *processorListener) run() {
 }
 ```
 
+# 总结
+本文分析了大部分controller都涉及的informer背后的流程，主线包括从监听变更，到事件存储，再到回调客户端。重点讲解了监听变更和回调客户端两部分，变更事件存储的内容请参见本地indexer的建立和索引
+
