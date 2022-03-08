@@ -260,8 +260,19 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 ```
 
 ## 启动Informer机制
-
+sharedInformerFactory启动各个informer，informer分别建立自己的DeltaFIFO做List&Watch，然后回调变更事件给客户端的各个listener
 ```Golang
+// Start initializes all requested informers.
+func (f *sharedInformerFactory) Start(stopCh <-chan struct{}) {
+	// XXX
+	for informerType, informer := range f.informers {
+		if !f.startedInformers[informerType] {
+			go informer.Run(stopCh)
+			f.startedInformers[informerType] = true
+		}
+	}
+}
+
 func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 	fifo := NewDeltaFIFO(MetaNamespaceKeyFunc, s.indexer)
 	cfg := &Config{
