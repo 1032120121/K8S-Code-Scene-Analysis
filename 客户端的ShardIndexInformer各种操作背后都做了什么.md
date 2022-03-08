@@ -260,7 +260,7 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 ```
 
 ## 启动Informer机制
-sharedInformerFactory启动各个informer，informer分别建立自己的DeltaFIFO做List&Watch，然后回调变更事件给客户端的各个listener
+sharedInformerFactory启动各个informer，informer分别建立自己的DeltaFIFO并做List&Watch，监听的变更事件交给HandleDeltas处理
 ```Golang
 // Start initializes all requested informers.
 func (f *sharedInformerFactory) Start(stopCh <-chan struct{}) {
@@ -354,7 +354,7 @@ func (c *controller) HasSynced() bool {
 
 ## 变更事件响应和客户端回调
 
-客户端的事件处理回调通过AddEventHandlerWithResyncPeriod转换成listener，processor内部维护syncListener和普通listener，区别在于只有syncListener才会推送Sync类型的事件
+客户端的事件处理回调通过AddEventHandlerWithResyncPeriod转换成listener
 ```Golang
 type ResourceEventHandler interface {
 	OnAdd(obj interface{})
@@ -386,7 +386,7 @@ func (s *sharedIndexInformer) AddEventHandlerWithResyncPeriod(handler ResourceEv
 	}
 }
 ```
-HandleDeltas pop出的变更数据既保存到indexer，又通知processor的listener，变更事件
+HandleDeltas处理DeltaFIFO pop出来变更事件，保存到indexer，又分发到processor的listener，processor内部维护syncListener和普通listener，区别在于只有syncListener才接受Sync类型的事件
 ```Golang
 func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 	s.blockDeltas.Lock()
@@ -433,6 +433,10 @@ func (p *sharedProcessor) distribute(obj interface{}, sync bool) {
 		}
 	}
 }
+```
+
+每个listener回调自己的ResourceEventHandler
+```Golang
 
 func (p *processorListener) run() {
 	// this call blocks until the channel is closed.  When a panic happens during the notification
@@ -466,39 +470,7 @@ func (p *processorListener) run() {
 	}, 1*time.Minute, stopCh)
 }
 ```
-
-客户端的事件处理回调通过AddEventHandlerWithResyncPeriod转换成listener，processor内部维护syncListener和普通listener，区别在于只有syncListener才会推送Sync类型的事件
-```Golang
-type ResourceEventHandler interface {
-	OnAdd(obj interface{})
-	OnUpdate(oldObj, newObj interface{})
-	OnDelete(obj interface{})
-}
-
-func (s *sharedIndexInformer) AddEventHandlerWithResyncPeriod(handler ResourceEventHandler, resyncPeriod time.Duration) {
-	// XXX
-	listener := newProcessListener(handler, resyncPeriod, determineResyncPeriod(resyncPeriod, s.resyncCheckPeriod), s.clock.Now(), initialBufferSize)
-
-	if !s.started {
-		s.processor.addListener(listener)
-		return
-	}
-
-	// in order to safely join, we have to
-	// 1. stop sending add/update/delete notifications
-	// 2. do a list against the store
-	// 3. send synthetic "Add" events to the new handler
-	// 4. unblock
-	s.blockDeltas.Lock()
-	defer s.blockDeltas.Unlock()
-
-	s.processor.addListener(listener)
-	//已经启动的sharedIndexInformer，要从indexer中重新添加一遍所有事件
-	for _, item := range s.indexer.List() {
-		listener.add(addNotification{newObj: item})
-	}
-}
-
+```
 // shouldResync queries every listener to determine if any of them need a resync, based on each
 // listener's resyncPeriod.
 func (p *sharedProcessor) shouldResync() bool {
