@@ -259,6 +259,79 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 }
 ```
 
+## 启动Informer机制
+```Golang
+func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
+	fifo := NewDeltaFIFO(MetaNamespaceKeyFunc, s.indexer)
+	cfg := &Config{
+	        // 客户端的Queue真实实例是DeltaFIFO，就是带有pop功能的Store
+		Queue:            fifo,
+		ListerWatcher:    s.listerWatcher,
+		// XXX
+                // 从DeltaFIFO pop出来的数据处理函数
+		Process: s.HandleDeltas,
+	}
+	
+	func() {
+	        // XXX
+		// 每个sharedIndexInformer配一个controller
+		s.controller = New(cfg)
+		// XXX
+	}()
+
+        // XXX
+	// 启动processor里的多个listener
+	wg.StartWithChannel(processorStopCh, s.processor.run)
+ 
+        // XXX
+	s.controller.Run(stopCh)
+}
+
+func (c *controller) Run(stopCh <-chan struct{}) {
+	// XXX
+	// controller包含reflector用于list&watch
+	r := NewReflector(
+		c.config.ListerWatcher,
+		c.config.ObjectType,
+		c.config.Queue,
+		c.config.FullResyncPeriod,
+	)
+	// XXX
+	
+	c.reflectorMutex.Lock()
+	c.reflector = r
+	c.reflectorMutex.Unlock()
+
+	// XXX
+	// 启动reflector的list&watch
+	wg.StartWithChannel(stopCh, r.Run)
+
+	wait.Until(c.processLoop, time.Second, stopCh)
+}
+
+func (c *controller) processLoop() {
+	for {
+	        // 周期性的从DeltaFIFO中pop变更事件，事件处理函数就是Handle
+		obj, err := c.config.Queue.Pop(PopProcessFunc(c.config.Process))
+		if err != nil {
+			if err == ErrFIFOClosed {
+				return
+			}
+			// 如果出错就重新入队
+			if c.config.RetryOnError {
+				// This is the safe way to re-enqueue.
+				c.config.Queue.AddIfNotPresent(obj)
+			}
+		}
+	}
+}
+
+```
+
+## 变更事件响应和客户端回调
+
+HandleDeltas
+
 ```Golang
 type SharedInformer interface {
 	// AddEventHandler adds an event handler to the shared informer using the shared informer's resync
