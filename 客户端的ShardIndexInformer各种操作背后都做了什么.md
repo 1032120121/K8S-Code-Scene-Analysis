@@ -354,8 +354,39 @@ func (c *controller) HasSynced() bool {
 
 ## 变更事件响应和客户端回调
 
-HandleDeltas
+客户端的事件处理回调通过AddEventHandlerWithResyncPeriod转换成listener，processor内部维护syncListener和普通listener，区别在于只有syncListener才会推送Sync类型的事件
+```Golang
+type ResourceEventHandler interface {
+	OnAdd(obj interface{})
+	OnUpdate(oldObj, newObj interface{})
+	OnDelete(obj interface{})
+}
 
+func (s *sharedIndexInformer) AddEventHandlerWithResyncPeriod(handler ResourceEventHandler, resyncPeriod time.Duration) {
+	// XXX
+	listener := newProcessListener(handler, resyncPeriod, determineResyncPeriod(resyncPeriod, s.resyncCheckPeriod), s.clock.Now(), initialBufferSize)
+
+	if !s.started {
+		s.processor.addListener(listener)
+		return
+	}
+
+	// in order to safely join, we have to
+	// 1. stop sending add/update/delete notifications
+	// 2. do a list against the store
+	// 3. send synthetic "Add" events to the new handler
+	// 4. unblock
+	s.blockDeltas.Lock()
+	defer s.blockDeltas.Unlock()
+
+	s.processor.addListener(listener)
+	//已经启动的sharedIndexInformer，要从indexer中重新添加一遍所有事件
+	for _, item := range s.indexer.List() {
+		listener.add(addNotification{newObj: item})
+	}
+}
+```
+HandleDeltas pop出的变更数据既保存到indexer，又通知processor的listener，变更事件
 ```Golang
 func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 	s.blockDeltas.Lock()
@@ -386,6 +417,106 @@ func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 		}
 	}
 	return nil
+}
+
+func (p *sharedProcessor) distribute(obj interface{}, sync bool) {
+	p.listenersLock.RLock()
+	defer p.listenersLock.RUnlock()
+
+	if sync {
+		for _, listener := range p.syncingListeners {
+			listener.add(obj)
+		}
+	} else {
+		for _, listener := range p.listeners {
+			listener.add(obj)
+		}
+	}
+}
+
+func (p *processorListener) run() {
+	// this call blocks until the channel is closed.  When a panic happens during the notification
+	// we will catch it, **the offending item will be skipped!**, and after a short delay (one second)
+	// the next notification will be attempted.  This is usually better than the alternative of never
+	// delivering again.
+	stopCh := make(chan struct{})
+	wait.Until(func() {
+		// this gives us a few quick retries before a long pause and then a few more quick retries
+		err := wait.ExponentialBackoff(retry.DefaultRetry, func() (bool, error) {
+			for next := range p.nextCh {
+				switch notification := next.(type) {
+				case updateNotification:
+					p.handler.OnUpdate(notification.oldObj, notification.newObj)
+				case addNotification:
+					p.handler.OnAdd(notification.newObj)
+				case deleteNotification:
+					p.handler.OnDelete(notification.oldObj)
+				default:
+					utilruntime.HandleError(fmt.Errorf("unrecognized notification: %T", next))
+				}
+			}
+			// the only way to get here is if the p.nextCh is empty and closed
+			return true, nil
+		})
+
+		// the only way to get here is if the p.nextCh is empty and closed
+		if err == nil {
+			close(stopCh)
+		}
+	}, 1*time.Minute, stopCh)
+}
+```
+
+客户端的事件处理回调通过AddEventHandlerWithResyncPeriod转换成listener，processor内部维护syncListener和普通listener，区别在于只有syncListener才会推送Sync类型的事件
+```Golang
+type ResourceEventHandler interface {
+	OnAdd(obj interface{})
+	OnUpdate(oldObj, newObj interface{})
+	OnDelete(obj interface{})
+}
+
+func (s *sharedIndexInformer) AddEventHandlerWithResyncPeriod(handler ResourceEventHandler, resyncPeriod time.Duration) {
+	// XXX
+	listener := newProcessListener(handler, resyncPeriod, determineResyncPeriod(resyncPeriod, s.resyncCheckPeriod), s.clock.Now(), initialBufferSize)
+
+	if !s.started {
+		s.processor.addListener(listener)
+		return
+	}
+
+	// in order to safely join, we have to
+	// 1. stop sending add/update/delete notifications
+	// 2. do a list against the store
+	// 3. send synthetic "Add" events to the new handler
+	// 4. unblock
+	s.blockDeltas.Lock()
+	defer s.blockDeltas.Unlock()
+
+	s.processor.addListener(listener)
+	//已经启动的sharedIndexInformer，要从indexer中重新添加一遍所有事件
+	for _, item := range s.indexer.List() {
+		listener.add(addNotification{newObj: item})
+	}
+}
+
+// shouldResync queries every listener to determine if any of them need a resync, based on each
+// listener's resyncPeriod.
+func (p *sharedProcessor) shouldResync() bool {
+	// XXX
+	// 每次resync重置syncingListerner列表
+	p.syncingListeners = []*processorListener{}
+
+	// XXX
+	for _, listener := range p.listeners {
+		// need to loop through all the listeners to see if they need to resync so we can prepare any
+		// listeners that are going to be resyncing.
+		if listener.shouldResync(now) {
+			resyncNeeded = true
+			p.syncingListeners = append(p.syncingListeners, listener)
+			listener.determineNextResync(now)
+		}
+	}
+	return resyncNeeded
 }
 
 type SharedInformer interface {
