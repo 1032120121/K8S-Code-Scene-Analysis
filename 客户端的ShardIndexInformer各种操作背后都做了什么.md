@@ -165,7 +165,7 @@ type PodInformer interface {
 PodInformer有两种创建方法：<br/>
 	1. 使用factory创建，如podInformer.Informer()。一般倾向于这种共享的informer以节省资源;<br/>
 	2. 直接调用NewPodInformer创建；<br/>
-无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod。defaultInformer默认只给出namepsace的索引函数**cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}**。lister返回的就是这个内存索引中的数据，如f.Informer().GetIndexer()
+无论那种最终都实际调用NewFilteredPodInformer，用client建立List&Watch，以及Watch的对象类型Pod。lister返回的就是这个内存索引中的数据，如f.Informer().GetIndexer()
 ```Golang
 
 func (f *podInformer) defaultInformer(client kubernetes.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
@@ -229,6 +229,42 @@ func NewIndexer(keyFunc KeyFunc, indexers Indexers) Indexer {
 		cacheStorage: NewThreadSafeStore(indexers, Indices{}),
 		keyFunc:      keyFunc,
 	}
+}
+
+type SharedInformer interface {
+	// AddEventHandler adds an event handler to the shared informer using the shared informer's resync
+	// period.  Events to a single handler are delivered sequentially, but there is no coordination
+	// between different handlers.
+	AddEventHandler(handler ResourceEventHandler)
+	// AddEventHandlerWithResyncPeriod adds an event handler to the
+	// shared informer using the specified resync period.  The resync
+	// operation consists of delivering to the handler a create
+	// notification for every object in the informer's local cache; it
+	// does not add any interactions with the authoritative storage.
+	AddEventHandlerWithResyncPeriod(handler ResourceEventHandler, resyncPeriod time.Duration)
+	// GetStore returns the informer's local cache as a Store.
+	GetStore() Store
+	// GetController gives back a synthetic interface that "votes" to start the informer
+	GetController() Controller
+	// Run starts and runs the shared informer, returning after it stops.
+	// The informer will be stopped when stopCh is closed.
+	Run(stopCh <-chan struct{})
+	// HasSynced returns true if the shared informer's store has been
+	// informed by at least one full LIST of the authoritative state
+	// of the informer's object collection.  This is unrelated to "resync".
+	HasSynced() bool
+	// LastSyncResourceVersion is the resource version observed when last synced with the underlying
+	// store. The value returned is not synchronized with access to the underlying store and is not
+	// thread-safe.
+	LastSyncResourceVersion() string
+}
+
+// SharedIndexInformer provides add and get Indexers ability based on SharedInformer.
+type SharedIndexInformer interface {
+	SharedInformer
+	// AddIndexers add indexers to the informer before it starts.
+	AddIndexers(indexers Indexers) error
+	GetIndexer() Indexer
 }
 ```
 
@@ -352,7 +388,7 @@ func (c *controller) HasSynced() bool {
 }
 ```
 
-## 变更事件响应和客户端回调
+## 响应变更事件和回调客户端
 
 客户端的事件处理回调通过AddEventHandlerWithResyncPeriod转换成listener
 ```Golang
@@ -468,62 +504,6 @@ func (p *processorListener) run() {
 			close(stopCh)
 		}
 	}, 1*time.Minute, stopCh)
-}
-```
-```
-// shouldResync queries every listener to determine if any of them need a resync, based on each
-// listener's resyncPeriod.
-func (p *sharedProcessor) shouldResync() bool {
-	// XXX
-	// 每次resync重置syncingListerner列表
-	p.syncingListeners = []*processorListener{}
-
-	// XXX
-	for _, listener := range p.listeners {
-		// need to loop through all the listeners to see if they need to resync so we can prepare any
-		// listeners that are going to be resyncing.
-		if listener.shouldResync(now) {
-			resyncNeeded = true
-			p.syncingListeners = append(p.syncingListeners, listener)
-			listener.determineNextResync(now)
-		}
-	}
-	return resyncNeeded
-}
-
-type SharedInformer interface {
-	// AddEventHandler adds an event handler to the shared informer using the shared informer's resync
-	// period.  Events to a single handler are delivered sequentially, but there is no coordination
-	// between different handlers.
-	AddEventHandler(handler ResourceEventHandler)
-	// AddEventHandlerWithResyncPeriod adds an event handler to the
-	// shared informer using the specified resync period.  The resync
-	// operation consists of delivering to the handler a create
-	// notification for every object in the informer's local cache; it
-	// does not add any interactions with the authoritative storage.
-	AddEventHandlerWithResyncPeriod(handler ResourceEventHandler, resyncPeriod time.Duration)
-	// GetStore returns the informer's local cache as a Store.
-	GetStore() Store
-	// GetController gives back a synthetic interface that "votes" to start the informer
-	GetController() Controller
-	// Run starts and runs the shared informer, returning after it stops.
-	// The informer will be stopped when stopCh is closed.
-	Run(stopCh <-chan struct{})
-	// HasSynced returns true if the shared informer's store has been
-	// informed by at least one full LIST of the authoritative state
-	// of the informer's object collection.  This is unrelated to "resync".
-	HasSynced() bool
-	// LastSyncResourceVersion is the resource version observed when last synced with the underlying
-	// store. The value returned is not synchronized with access to the underlying store and is not
-	// thread-safe.
-	LastSyncResourceVersion() string
-}
-// SharedIndexInformer provides add and get Indexers ability based on SharedInformer.
-type SharedIndexInformer interface {
-	SharedInformer
-	// AddIndexers add indexers to the informer before it starts.
-	AddIndexers(indexers Indexers) error
-	GetIndexer() Indexer
 }
 ```
 
