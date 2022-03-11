@@ -1,20 +1,18 @@
 
 # 实现
+
 ## 全局初始化
-在apiserver的起始文件cmd/kube-apiserver/app/server.go中，做了大量Group和Version的隐含初始化工作。
+
+在apiserver的起始文件cmd/kube-apiserver/app/server.go中，通过import方式做了大量Group和Version的隐含初始化工作。
 ```Golang
 import （
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/controlplane" 
-  // xxx
+        // xxx
 ）
 ```
 
-使用了legacyscheme.Scheme和legacyscheme.Codecs等全局变了，提前import包k8s.io/kubernetes/pkg/api/legacyscheme
-
-
-其中包"k8s.io/kubernetes/pkg/controlplane"下通过import方式初始化各个API Group的Scheme，注册Group所属的对象类型
-  
+其中包"k8s.io/kubernetes/pkg/controlplane" 下初始化各个API Group自己的Scheme，注册Group所属的对象类型进去
 ```Golang
 // file: "k8s.io/kubernetes/pkg/controlplane/import_known_version.go"
 package controlplane
@@ -62,7 +60,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	if err := scheme.AddIgnoredConversionType(&metav1.TypeMeta{}, &metav1.TypeMeta{}); err != nil {
 		return err
 	} 
-  // 注册legacy核心api
+        // 注册legacy核心api的资源对象
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&Pod{},
 		&PodList{},
@@ -114,7 +112,9 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 }
 ```
 
-k8s.io/kubernetes/pkg/apis/core/install
+完成隐含初始化后，各个api包下的Scheme、Codecs等全局变量就有值了，如包"k8s.io/kubernetes/pkg/api/legacyscheme" 的legacyscheme.Scheme和legacyscheme.Codecs
+
+
 
 
 // FullHandlerChain -> Director -> {GoRestfulContainer,NonGoRestfulMux} based on inspection of registered web services
