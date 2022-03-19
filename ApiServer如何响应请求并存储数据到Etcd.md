@@ -99,6 +99,8 @@ type Config struct {
 	// BuildHandlerChainFunc allows you to build custom handler chains by decorating the apiHandler.
 	BuildHandlerChainFunc func(apiHandler http.Handler, c *Config) (secure http.Handler)
 	// XXX
+	// RESTOptionsGetter is used to construct RESTStorage types via the generic registry.
+	RESTOptionsGetter genericregistry.RESTOptionsGetter
 }
 
 // 关键的配置函数
@@ -128,11 +130,26 @@ func buildGenericConfig(
     if lastErr = s.APIEnablement.ApplyTo(genericConfig, controlplane.DefaultAPIResourceConfigSource(), legacyscheme.Scheme); lastErr != nil {
 	return
     }
-    
-    
+  
     // XXX
+    storageFactoryConfig := kubeapiserver.NewStorageFactoryConfig() // 配置存储内部特定的Resource和version，如csistoragecapacities/v1beta1。存储的gvr和外部api的gvr关注点不同，所以是分开的。
+    storageFactoryConfig.APIResourceConfig = genericConfig.MergedResourceConfig
+    completedStorageFactoryConfig, err := storageFactoryConfig.Complete(s.Etcd)  // etcd的参数配置到storageFactoryConfig
+    if err != nil {
+	lastErr = err
+	return
+    }
+    storageFactory, lastErr = completedStorageFactoryConfig.New()  // 决定同一种Resource的不同Group选择哪个作为存储位置，比如apps.deployments和extensions.deployments
+    if lastErr != nil {
+	return
+    }  
+    // XX
+    if lastErr = s.Etcd.ApplyWithStorageFactoryTo(storageFactory, genericConfig); lastErr != nil { // 设置RESTOptionsGetter，它决定各个Resource的RestStorage
+	return
+    }
 }
 ```
+
 定义了完整的http请求处理流程
 ```Golang
 // NewConfig returns a Config struct with the default values
@@ -236,6 +253,7 @@ func DefaultBuildHandlerChain(apiHandler http.Handler, c *Config) http.Handler {
 	return handler
 }
 ```
+
 apiserver可以通过--runtime-config参数控制api/all、api/ga、api/beta、api/alpha四种内置API的启用和禁止（一般用在aggregatorServer，普通kubeApiserver不需要）。先确定了server**默认**支持的gv和gvr。再进行Merge
 ```Golang
 // DefaultAPIResourceConfigSource returns default configuration for an APIResource.
@@ -298,6 +316,68 @@ func DefaultAPIResourceConfigSource() *serverstorage.ResourceConfig {
 
 ```
 
+RESTOptionsGetter接口由StorageFactoryRestOptionsFactory对象实现，StorageFactoryRestOptionsFactory的核心是StorageFactory，StorageFactory接口由DefaultStorageFactory对象实现。
+```
+type RESTOptionsGetter interface {
+	GetRESTOptions(resource schema.GroupResource) (RESTOptions, error)
+}
+
+type StorageFactoryRestOptionsFactory struct {
+	// XXX
+	StorageFactory serverstorage.StorageFactory
+}
+
+// StorageFactory is the interface to locate the storage for a given GroupResource
+type StorageFactory interface {
+	// New finds the storage destination for the given group and resource. It will
+	// return an error if the group has no storage destination configured.
+	NewConfig(groupResource schema.GroupResource) (*storagebackend.Config, error)
+
+	// ResourcePrefix returns the overridden resource prefix for the GroupResource
+	// This allows for cohabitation of resources with different native types and provides
+	// centralized control over the shape of etcd directories
+	ResourcePrefix(groupResource schema.GroupResource) string
+
+	// Backends gets all backends for all registered storage destinations.
+	// Used for getting all instances for health validations.
+	Backends() []Backend
+}
+
+func (f *StorageFactoryRestOptionsFactory) GetRESTOptions(resource schema.GroupResource) (generic.RESTOptions, error) {
+	storageConfig, err := f.StorageFactory.NewConfig(resource)
+	if err != nil {
+		return generic.RESTOptions{}, fmt.Errorf("unable to find storage destination for %v, due to %v", resource, err.Error())
+	}
+
+	ret := generic.RESTOptions{
+		StorageConfig:           storageConfig,
+		Decorator:               generic.UndecoratedStorage,
+		DeleteCollectionWorkers: f.Options.DeleteCollectionWorkers,
+		EnableGarbageCollection: f.Options.EnableGarbageCollection,
+		ResourcePrefix:          f.StorageFactory.ResourcePrefix(resource),
+		CountMetricPollPeriod:   f.Options.StorageConfig.CountMetricPollPeriod,
+	}
+	if f.Options.EnableWatchCache {
+		sizes, err := ParseWatchCacheSizes(f.Options.WatchCacheSizes)
+		if err != nil {
+			return generic.RESTOptions{}, err
+		}
+		size, ok := sizes[resource]
+		if ok && size > 0 {
+			klog.Warningf("Dropping watch-cache-size for %v - watchCache size is now dynamic", resource)
+		}
+		if ok && size <= 0 {
+			ret.Decorator = generic.UndecoratedStorage
+		} else {
+			ret.Decorator = genericregistry.StorageWithCacher()
+		}
+	}
+
+	return ret, nil
+}
+
+```
+
 ## 全局初始化
 
 在apiserver的起始文件cmd/kube-apiserver/app/server.go中，通过import方式做了大量Group和Version的隐含初始化工作。
@@ -307,6 +387,7 @@ import （
 	"k8s.io/kubernetes/pkg/controlplane" 
         // xxx
 ）
+
 ```
 
 其中包"k8s.io/kubernetes/pkg/controlplane" 下初始化各个API Group自己的Scheme，注册Group所属的对象类型进去
