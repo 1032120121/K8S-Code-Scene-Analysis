@@ -324,7 +324,8 @@ type StorageDecorator func(
 	getAttrsFunc storage.AttrFunc,
 	trigger storage.IndexerFuncs,
 	indexers *cache.Indexers) (storage.Interface, factory.DestroyFunc, error)
-	
+
+// file: vendor/k8s\.io/apiserver/pkg/storage/inteface.go
 // Interface offers a common interface for object marshaling/unmarshaling operations and
 // hides all the storage-related operations behind it.
 type Interface interface {
@@ -542,7 +543,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 apiserver可以通过--runtime-config启动时参数控制api/all、api/ga、api/beta、api/alpha四种内置API的启用和禁止（一般用在aggregatorServer，普通kubeApiserver不需要）。先确定了server**默认**支持的gv和gvr
 
 ### 默认资源版本
-再次回到buildGenericConfig。 APIEnablement.ApplyTo函数最终合并了全局初始化的资源API、自定义资源版本、默认支持的资源版本，决策出要存储到ETCD的最终GVR
+再次回到buildGenericConfig。 APIEnablement.ApplyTo函数最终Merge了全局初始化的资源API、自定义资源版本、默认支持的资源版本。自定义资源版本可以覆盖默认的，排除掉未注册到全局Scheme中的，最终决策出要存储到ETCD的GVR
 ``` Golang
 func buildGenericConfig(
     // XXX
@@ -628,12 +629,10 @@ StorageFactoryRestOptionsFactory的核心是StorageFactory，StorageFactory接�
 ```Golang
 // StorageFactory is the interface to locate the storage for a given GroupResource
 type StorageFactory interface {
-        // 存储到ETCD中的各种参数，包括但不限于是否所有key的统一前缀、是否分页、etcd server的连接参数、编解码、Compaction时间间隔、健康检查、租约等
 	// New finds the storage destination for the given group and resource. It will
 	// return an error if the group has no storage destination configured.
 	NewConfig(groupResource schema.GroupResource) (*storagebackend.Config, error)
 
-        // 返回该GroupResource的存储在ETCD中的特定前缀。选择的优先顺序是该GroupResource精确的前缀 > 该Group的前缀（Resource为"*"）> Resource的小写
 	// ResourcePrefix returns the overridden resource prefix for the GroupResource
 	// This allows for cohabitation of resources with different native types and provides
 	// centralized control over the shape of etcd directories
@@ -644,7 +643,11 @@ type StorageFactory interface {
 	// Used for getting all instances for health validations.
 	Backends() []Backend
 }
+```
 
+Factory只有一个，但每种GroupResource都重新copy一个新的配置
+```
+// 存储到ETCD中的各种参数，包括但不限于是否所有key的统一前缀、是否分页、etcd server的连接参数、编解码、Compaction时间间隔、健康检查、租约等
 // New finds the storage destination for the given group and resource. It will
 // return an error if the group has no storage destination configured.
 func (s *DefaultStorageFactory) NewConfig(groupResource schema.GroupResource) (*storagebackend.Config, error) {
@@ -652,7 +655,7 @@ func (s *DefaultStorageFactory) NewConfig(groupResource schema.GroupResource) (*
 	chosenStorageResource := s.getStorageGroupResource(groupResource)
 
 
-	// operate on copy。Factory只有一个，但每种GroupResource都重新copy一个新的配置
+	// operate on copy。
 	storageConfig := s.StorageConfig
 	codecConfig := StorageCodecConfig{
 		StorageMediaType:  s.DefaultMediaType,
@@ -690,6 +693,28 @@ func (s *DefaultStorageFactory) NewConfig(groupResource schema.GroupResource) (*
 
 ```
 
+返回该GroupResource的存储在ETCD中的特定前缀。选择的优先顺序是该GroupResource精确的前缀 > 该Group的前缀（Resource为"*"）> Resource的小写
+```Golang
+func (s *DefaultStorageFactory) ResourcePrefix(groupResource schema.GroupResource) string {
+	chosenStorageResource := s.getStorageGroupResource(groupResource)
+	groupOverride := s.Overrides[getAllResourcesAlias(chosenStorageResource)]
+	exactResourceOverride := s.Overrides[chosenStorageResource]
+
+	etcdResourcePrefix := s.DefaultResourcePrefixes[chosenStorageResource]
+	if len(groupOverride.etcdResourcePrefix) > 0 {
+		etcdResourcePrefix = groupOverride.etcdResourcePrefix
+	}
+	if len(exactResourceOverride.etcdResourcePrefix) > 0 {
+		etcdResourcePrefix = exactResourceOverride.etcdResourcePrefix
+	}
+	if len(etcdResourcePrefix) == 0 {
+		etcdResourcePrefix = strings.ToLower(chosenStorageResource.Resource)
+	}
+
+	return etcdResourcePrefix
+}
+```
+
 
 http请求的handler链：DefaultBuildHandlerChain
 
@@ -697,104 +722,6 @@ http请求的handler链：DefaultBuildHandlerChain
 // FullHandlerChain -> Director -> {
 GoRestfulContainer,NonGoRestfulMux} based on inspection of registered web services
 type APIServerHandler struct {
-
-
-etcd vendor/k8s\.io/apiserver/pkg/storage/inteface.go
-// Interface offers a common interface for object marshaling/unmarshaling operations and
-// hides all the storage-related operations behind it.
-type Interface interface {
-	// Returns Versioner associated with this interface.
-	Versioner() Versioner
-
-	// Create adds a new object at a key unless it already exists. 'ttl' is time-to-live
-	// in seconds (0 means forever). If no error is returned and out is not nil, out will be
-	// set to the read value from database.
-	Create(ctx context.Context, key string, obj, out runtime.Object, ttl uint64) error
-
-	// Delete removes the specified key and returns the value that existed at that spot.
-	// If key didn't exist, it will return NotFound storage error.
-	// If 'cachedExistingObject' is non-nil, it can be used as a suggestion about the
-	// current version of the object to avoid read operation from storage to get it.
-	// However, the implementations have to retry in case suggestion is stale.
-	Delete(
-		ctx context.Context, key string, out runtime.Object, preconditions *Preconditions,
-		validateDeletion ValidateObjectFunc, cachedExistingObject runtime.Object) error
-
-	// Watch begins watching the specified key. Events are decoded into API objects,
-	// and any items selected by 'p' are sent down to returned watch.Interface.
-	// resourceVersion may be used to specify what version to begin watching,
-	// which should be the current resourceVersion, and no longer rv+1
-	// (e.g. reconnecting without missing any updates).
-	// If resource version is "0", this interface will get current object at given key
-	// and send it in an "ADDED" event, before watch starts.
-	Watch(ctx context.Context, key string, opts ListOptions) (watch.Interface, error)
-
-	// WatchList begins watching the specified key's items. Items are decoded into API
-	// objects and any item selected by 'p' are sent down to returned watch.Interface.
-	// resourceVersion may be used to specify what version to begin watching,
-	// which should be the current resourceVersion, and no longer rv+1
-	// (e.g. reconnecting without missing any updates).
-	// If resource version is "0", this interface will list current objects directory defined by key
-	// and send them in "ADDED" events, before watch starts.
-	WatchList(ctx context.Context, key string, opts ListOptions) (watch.Interface, error)
-
-	// Get unmarshals json found at key into objPtr. On a not found error, will either
-	// return a zero object of the requested type, or an error, depending on 'opts.ignoreNotFound'.
-	// Treats empty responses and nil response nodes exactly like a not found error.
-	// The returned contents may be delayed, but it is guaranteed that they will
-	// match 'opts.ResourceVersion' according 'opts.ResourceVersionMatch'.
-	Get(ctx context.Context, key string, opts GetOptions, objPtr runtime.Object) error
-
-	// GetToList unmarshals json found at key and opaque it into *List api object
-	// (an object that satisfies the runtime.IsList definition).
-	// The returned contents may be delayed, but it is guaranteed that they will
-	// match 'opts.ResourceVersion' according 'opts.ResourceVersionMatch'.
-	GetToList(ctx context.Context, key string, opts ListOptions, listObj runtime.Object) error
-
-	// List unmarshalls jsons found at directory defined by key and opaque them
-	// into *List api object (an object that satisfies runtime.IsList definition).
-	// The returned contents may be delayed, but it is guaranteed that they will
-	// match 'opts.ResourceVersion' according 'opts.ResourceVersionMatch'.
-	List(ctx context.Context, key string, opts ListOptions, listObj runtime.Object) error
-
-	// GuaranteedUpdate keeps calling 'tryUpdate()' to update key 'key' (of type 'ptrToType')
-	// retrying the update until success if there is index conflict.
-	// Note that object passed to tryUpdate may change across invocations of tryUpdate() if
-	// other writers are simultaneously updating it, so tryUpdate() needs to take into account
-	// the current contents of the object when deciding how the update object should look.
-	// If the key doesn't exist, it will return NotFound storage error if ignoreNotFound=false
-	// or zero value in 'ptrToType' parameter otherwise.
-	// If the object to update has the same value as previous, it won't do any update
-	// but will return the object in 'ptrToType' parameter.
-	// If 'cachedExistingObject' is non-nil, it can be used as a suggestion about the
-	// current version of the object to avoid read operation from storage to get it.
-	// However, the implementations have to retry in case suggestion is stale.
-	//
-	// Example:
-	//
-	// s := /* implementation of Interface */
-	// err := s.GuaranteedUpdate(
-	//     "myKey", &MyType{}, true,
-	//     func(input runtime.Object, res ResponseMeta) (runtime.Object, *uint64, error) {
-	//       // Before each invocation of the user defined function, "input" is reset to
-	//       // current contents for "myKey" in database.
-	//       curr := input.(*MyType)  // Guaranteed to succeed.
-	//
-	//       // Make the modification
-	//       curr.Counter++
-	//
-	//       // Return the modified object - return an error to stop iterating. Return
-	//       // a uint64 to alter the TTL on the object, or nil to keep it the same value.
-	//       return cur, nil, nil
-	//    },
-	// )
-	GuaranteedUpdate(
-		ctx context.Context, key string, ptrToType runtime.Object, ignoreNotFound bool,
-		preconditions *Preconditions, tryUpdate UpdateFunc, cachedExistingObject runtime.Object) error
-
-	// Count returns number of different entries under the key (generally being path prefix).
-	Count(key string) (int64, error)
-}
 
 
 gvk转换
