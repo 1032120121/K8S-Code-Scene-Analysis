@@ -757,127 +757,12 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 		ClusterAuthenticationInfo: c.ExtraConfig.ClusterAuthenticationInfo,
 	}
 
-	// install legacy rest storage
-	if c.ExtraConfig.APIResourceConfigSource.VersionEnabled(apiv1.SchemeGroupVersion) {
-		legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{
-			StorageFactory:              c.ExtraConfig.StorageFactory,
-			ProxyTransport:              c.ExtraConfig.ProxyTransport,
-			KubeletClientConfig:         c.ExtraConfig.KubeletClientConfig,
-			EventTTL:                    c.ExtraConfig.EventTTL,
-			ServiceIPRange:              c.ExtraConfig.ServiceIPRange,
-			SecondaryServiceIPRange:     c.ExtraConfig.SecondaryServiceIPRange,
-			ServiceNodePortRange:        c.ExtraConfig.ServiceNodePortRange,
-			LoopbackClientConfig:        c.GenericConfig.LoopbackClientConfig,
-			ServiceAccountIssuer:        c.ExtraConfig.ServiceAccountIssuer,
-			ExtendExpiration:            c.ExtraConfig.ExtendExpiration,
-			ServiceAccountMaxExpiration: c.ExtraConfig.ServiceAccountMaxExpiration,
-			APIAudiences:                c.GenericConfig.Authentication.APIAudiences,
-		}
-		if err := m.InstallLegacyAPI(&c, c.GenericConfig.RESTOptionsGetter, legacyRESTStorageProvider); err != nil {
-			return nil, err
-		}
-	}
-
-	// The order here is preserved in discovery.
-	// If resources with identical names exist in more than one of these groups (e.g. "deployments.apps"" and "deployments.extensions"),
-	// the order of this list determines which group an unqualified resource name (e.g. "deployments") should prefer.
-	// This priority order is used for local discovery, but it ends up aggregated in `k8s.io/kubernetes/cmd/kube-apiserver/app/aggregator.go
-	// with specific priorities.
-	// TODO: describe the priority all the way down in the RESTStorageProviders and plumb it back through the various discovery
-	// handlers that we have.
-	restStorageProviders := []RESTStorageProvider{
-		apiserverinternalrest.StorageProvider{},
-		authenticationrest.RESTStorageProvider{Authenticator: c.GenericConfig.Authentication.Authenticator, APIAudiences: c.GenericConfig.Authentication.APIAudiences},
-		authorizationrest.RESTStorageProvider{Authorizer: c.GenericConfig.Authorization.Authorizer, RuleResolver: c.GenericConfig.RuleResolver},
-		autoscalingrest.RESTStorageProvider{},
-		batchrest.RESTStorageProvider{},
-		certificatesrest.RESTStorageProvider{},
-		coordinationrest.RESTStorageProvider{},
-		discoveryrest.StorageProvider{},
-		extensionsrest.RESTStorageProvider{},
-		networkingrest.RESTStorageProvider{},
-		noderest.RESTStorageProvider{},
-		policyrest.RESTStorageProvider{},
-		rbacrest.RESTStorageProvider{Authorizer: c.GenericConfig.Authorization.Authorizer},
-		schedulingrest.RESTStorageProvider{},
-		storagerest.RESTStorageProvider{},
-		flowcontrolrest.RESTStorageProvider{},
-		// keep apps after extensions so legacy clients resolve the extensions versions of shared resource names.
-		// See https://github.com/kubernetes/kubernetes/issues/42392
-		appsrest.StorageProvider{},
-		admissionregistrationrest.RESTStorageProvider{},
-		eventsrest.RESTStorageProvider{TTL: c.ExtraConfig.EventTTL},
-	}
-	if err := m.InstallAPIs(c.ExtraConfig.APIResourceConfigSource, c.GenericConfig.RESTOptionsGetter, restStorageProviders...); err != nil {
-		return nil, err
-	}
-
-	m.GenericAPIServer.AddPostStartHookOrDie("start-cluster-authentication-info-controller", func(hookContext genericapiserver.PostStartHookContext) error {
-		kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
-		if err != nil {
-			return err
-		}
-		controller := clusterauthenticationtrust.NewClusterAuthenticationTrustController(m.ClusterAuthenticationInfo, kubeClient)
-
-		// prime values and start listeners
-		if m.ClusterAuthenticationInfo.ClientCA != nil {
-			m.ClusterAuthenticationInfo.ClientCA.AddListener(controller)
-			if controller, ok := m.ClusterAuthenticationInfo.ClientCA.(dynamiccertificates.ControllerRunner); ok {
-				// runonce to be sure that we have a value.
-				if err := controller.RunOnce(); err != nil {
-					runtime.HandleError(err)
-				}
-				go controller.Run(1, hookContext.StopCh)
-			}
-		}
-		if m.ClusterAuthenticationInfo.RequestHeaderCA != nil {
-			m.ClusterAuthenticationInfo.RequestHeaderCA.AddListener(controller)
-			if controller, ok := m.ClusterAuthenticationInfo.RequestHeaderCA.(dynamiccertificates.ControllerRunner); ok {
-				// runonce to be sure that we have a value.
-				if err := controller.RunOnce(); err != nil {
-					runtime.HandleError(err)
-				}
-				go controller.Run(1, hookContext.StopCh)
-			}
-		}
-
-		go controller.Run(1, hookContext.StopCh)
-		return nil
-	})
-
-	if utilfeature.DefaultFeatureGate.Enabled(apiserverfeatures.APIServerIdentity) {
-		m.GenericAPIServer.AddPostStartHookOrDie("start-kube-apiserver-identity-lease-controller", func(hookContext genericapiserver.PostStartHookContext) error {
-			kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
-			if err != nil {
-				return err
-			}
-			controller := lease.NewController(
-				clock.RealClock{},
-				kubeClient,
-				m.GenericAPIServer.APIServerID,
-				int32(c.ExtraConfig.IdentityLeaseDurationSeconds),
-				nil,
-				time.Duration(c.ExtraConfig.IdentityLeaseRenewIntervalSeconds)*time.Second,
-				metav1.NamespaceSystem,
-				labelAPIServerHeartbeat)
-			go controller.Run(wait.NeverStop)
-			return nil
-		})
-		m.GenericAPIServer.AddPostStartHookOrDie("start-kube-apiserver-identity-lease-garbage-collector", func(hookContext genericapiserver.PostStartHookContext) error {
-			kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
-			if err != nil {
-				return err
-			}
-			go apiserverleasegc.NewAPIServerLeaseGC(
-				kubeClient,
-				time.Duration(c.ExtraConfig.IdentityLeaseDurationSeconds)*time.Second,
-				metav1.NamespaceSystem,
-				KubeAPIServerIdentityLeaseLabelSelector,
-			).Run(wait.NeverStop)
-			return nil
-		})
-	}
-
+        // 安装API
+	// XXX
+	
+	// 添加GenericAPIServer hook
+	// XXX
+	
 	return m, nil
 }
 ```
@@ -902,10 +787,8 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 		Handler: apiServerHandler,
 		listedPathProvider: apiServerHandler,
 	}
+	// 安装API
 	// XXX
-	s.listedPathProvider = routes.ListedPathProviders{s.listedPathProvider, delegationTarget}
-
-	installAPI(s, c.Config)
 
 	// use the UnprotectedHandler from the delegation target to ensure that we don't attempt to double authenticator, authorize,
 	// or some other part of the filter chain in delegation cases.
@@ -1030,5 +913,89 @@ func (d director) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// if we didn't find a match, then we just skip gorestful altogether
 	klog.V(5).Infof("%v: %v %q satisfied by nonGoRestful", d.name, req.Method, path)
 	d.nonGoRestfulMux.ServeHTTP(w, req)
+}
+```
+
+## 安装API router
+再次回到kubeAPIServerConfig.Complete().New(delegateAPIServer).
+```Golang
+func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget) (*Instance, error) {
+	// 创建GenericAPIServer对象，构建Handler链
+	// XXX
+	
+	// install legacy rest storage
+	if c.ExtraConfig.APIResourceConfigSource.VersionEnabled(apiv1.SchemeGroupVersion) {
+		legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{
+			StorageFactory:              c.ExtraConfig.StorageFactory,
+			ProxyTransport:              c.ExtraConfig.ProxyTransport,
+			KubeletClientConfig:         c.ExtraConfig.KubeletClientConfig,
+			EventTTL:                    c.ExtraConfig.EventTTL,
+			ServiceIPRange:              c.ExtraConfig.ServiceIPRange,
+			SecondaryServiceIPRange:     c.ExtraConfig.SecondaryServiceIPRange,
+			ServiceNodePortRange:        c.ExtraConfig.ServiceNodePortRange,
+			LoopbackClientConfig:        c.GenericConfig.LoopbackClientConfig,
+			ServiceAccountIssuer:        c.ExtraConfig.ServiceAccountIssuer,
+			ExtendExpiration:            c.ExtraConfig.ExtendExpiration,
+			ServiceAccountMaxExpiration: c.ExtraConfig.ServiceAccountMaxExpiration,
+			APIAudiences:                c.GenericConfig.Authentication.APIAudiences,
+		}
+		if err := m.InstallLegacyAPI(&c, c.GenericConfig.RESTOptionsGetter, legacyRESTStorageProvider); err != nil {
+			return nil, err
+		}
+	}
+
+	// The order here is preserved in discovery.
+	// If resources with identical names exist in more than one of these groups (e.g. "deployments.apps"" and "deployments.extensions"),
+	// the order of this list determines which group an unqualified resource name (e.g. "deployments") should prefer.
+	// This priority order is used for local discovery, but it ends up aggregated in `k8s.io/kubernetes/cmd/kube-apiserver/app/aggregator.go
+	// with specific priorities.
+	// TODO: describe the priority all the way down in the RESTStorageProviders and plumb it back through the various discovery
+	// handlers that we have.
+	restStorageProviders := []RESTStorageProvider{
+		apiserverinternalrest.StorageProvider{},
+		authenticationrest.RESTStorageProvider{Authenticator: c.GenericConfig.Authentication.Authenticator, APIAudiences: c.GenericConfig.Authentication.APIAudiences},
+		authorizationrest.RESTStorageProvider{Authorizer: c.GenericConfig.Authorization.Authorizer, RuleResolver: c.GenericConfig.RuleResolver},
+		autoscalingrest.RESTStorageProvider{},
+		batchrest.RESTStorageProvider{},
+		certificatesrest.RESTStorageProvider{},
+		coordinationrest.RESTStorageProvider{},
+		discoveryrest.StorageProvider{},
+		extensionsrest.RESTStorageProvider{},
+		networkingrest.RESTStorageProvider{},
+		noderest.RESTStorageProvider{},
+		policyrest.RESTStorageProvider{},
+		rbacrest.RESTStorageProvider{Authorizer: c.GenericConfig.Authorization.Authorizer},
+		schedulingrest.RESTStorageProvider{},
+		storagerest.RESTStorageProvider{},
+		flowcontrolrest.RESTStorageProvider{},
+		// keep apps after extensions so legacy clients resolve the extensions versions of shared resource names.
+		// See https://github.com/kubernetes/kubernetes/issues/42392
+		appsrest.StorageProvider{},
+		admissionregistrationrest.RESTStorageProvider{},
+		eventsrest.RESTStorageProvider{TTL: c.ExtraConfig.EventTTL},
+	}
+	if err := m.InstallAPIs(c.ExtraConfig.APIResourceConfigSource, c.GenericConfig.RESTOptionsGetter, restStorageProviders...); err != nil {
+		return nil, err
+	}
+
+	// 添加GenericAPIServer hook
+	// XXX
+	
+	return m, nil
+}
+
+// c.GenericConfig.New("kube-apiserver", delegationTarget)
+func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*GenericAPIServer, error) {
+	// 构建handler链
+	// XXX
+	
+	s.listedPathProvider = routes.ListedPathProviders{s.listedPathProvider, delegationTarget}
+
+	installAPI(s, c.Config)
+
+        // 设置handler链的默认NotFound处理函数
+	// XXX
+
+	return s, nil
 }
 ```
