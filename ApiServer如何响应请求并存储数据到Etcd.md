@@ -126,7 +126,7 @@ func buildGenericConfig(
 	return
     }
     // XXX
-    // Merge资源API
+    // 配置genericConfig的MergedResourceConfig, 最终决定支持哪些GroupVersion，对应的Resource是否开启使能
     if lastErr = s.APIEnablement.ApplyTo(genericConfig, controlplane.DefaultAPIResourceConfigSource(), legacyscheme.Scheme); lastErr != nil {
 	return
     }
@@ -153,6 +153,7 @@ func buildGenericConfig(
     }
 }
 ```
+下面针对不同的流程来分别介绍buildGenericConfig的细节。
 
 ## http Server响应流程
 
@@ -270,7 +271,7 @@ type RESTOptionsGetter interface {
 
 type StorageFactoryRestOptionsFactory struct {
 	// XXX
-	StorageFactory serverstorage.StorageFactory
+	StorageFactory serverstorage.StorageFactory  // 在GVR版本转换流程中介绍
 }
 
 func (f *StorageFactoryRestOptionsFactory) GetRESTOptions(resource schema.GroupResource) (generic.RESTOptions, error) {
@@ -421,140 +422,10 @@ type Interface interface {
 }
 ```
 
-## 
-StorageFactoryRestOptionsFactory的核心是StorageFactory，StorageFactory接口由DefaultStorageFactory对象实现。而DefaultStorageFactory对象则在buildGenericConfig的completedStorageFactoryConfig.New()被创建。
-```Golang
-// StorageFactory is the interface to locate the storage for a given GroupResource
-type StorageFactory interface {
-        // 存储到ETCD中的各种参数，包括但不限于是否所有key的统一前缀、是否分页、etcd server的连接参数、编解码、Compaction时间间隔、健康检查、租约等
-	// New finds the storage destination for the given group and resource. It will
-	// return an error if the group has no storage destination configured.
-	NewConfig(groupResource schema.GroupResource) (*storagebackend.Config, error)
-
-        // 返回该GroupResource的存储在ETCD中的特定前缀。选择的优先顺序是该GroupResource精确的前缀 > 该Group的前缀（Resource为"*"）> Resource的小写
-	// ResourcePrefix returns the overridden resource prefix for the GroupResource
-	// This allows for cohabitation of resources with different native types and provides
-	// centralized control over the shape of etcd directories
-	ResourcePrefix(groupResource schema.GroupResource) string
-
-        // ETCD的server URL和TLS配置
-	// Backends gets all backends for all registered storage destinations.
-	// Used for getting all instances for health validations.
-	Backends() []Backend
-}
-
-// New finds the storage destination for the given group and resource. It will
-// return an error if the group has no storage destination configured.
-func (s *DefaultStorageFactory) NewConfig(groupResource schema.GroupResource) (*storagebackend.Config, error) {
-        // 按completedStorageFactoryConfig.New()定义的顺序，处理同一种Resource真正选择存储哪个Group到ETCD，比如apps.deployments和extensions.deployments
-	chosenStorageResource := s.getStorageGroupResource(groupResource)
-
-
-	// operate on copy。Factory只有一个，但每种GroupResource都重新copy一个新的配置
-	storageConfig := s.StorageConfig
-	codecConfig := StorageCodecConfig{
-		StorageMediaType:  s.DefaultMediaType,
-		StorageSerializer: s.DefaultSerializer,
-	}
-
-        // 精确的GroupResource的ETCD配置选项会覆盖模糊的Group(Resource为"*")
-	if override, ok := s.Overrides[getAllResourcesAlias(chosenStorageResource)]; ok {
-		override.Apply(&storageConfig, &codecConfig)
-	}
-	if override, ok := s.Overrides[chosenStorageResource]; ok {
-		override.Apply(&storageConfig, &codecConfig)
-	}
-
-	// 确定ETCD中的版本
-	codecConfig.StorageVersion, err = s.ResourceEncodingConfig.StorageEncodingFor(chosenStorageResource)
-	if err != nil {
-		return nil, err
-	}
-	// 确定内存中的版本
-	codecConfig.MemoryVersion, err = s.ResourceEncodingConfig.InMemoryEncodingFor(groupResource)
-	if err != nil {
-		return nil, err
-	}
-	codecConfig.Config = storageConfig
-
-	storageConfig.Codec, storageConfig.EncodeVersioner, err = s.newStorageCodecFn(codecConfig)
-	if err != nil {
-		return nil, err
-	}
-	klog.V(3).Infof("storing %v in %v, reading as %v from %#v", groupResource, codecConfig.StorageVersion, codecConfig.MemoryVersion, codecConfig.Config)
-
-	return &storageConfig, nil
-}
-
-```
 
 ## GVR版本处理
-apiserver可以通过--runtime-config参数控制api/all、api/ga、api/beta、api/alpha四种内置API的启用和禁止（一般用在aggregatorServer，普通kubeApiserver不需要）。先确定了server**默认**支持的gv和gvr。再进行Merge
-```Golang
-// DefaultAPIResourceConfigSource returns default configuration for an APIResource.
-func DefaultAPIResourceConfigSource() *serverstorage.ResourceConfig {
-	ret := serverstorage.NewResourceConfig()
-	// NOTE: GroupVersions listed here will be enabled by default. Don't put alpha versions in the list.
-	ret.EnableVersions(
-		admissionregistrationv1.SchemeGroupVersion,
-		admissionregistrationv1beta1.SchemeGroupVersion,
-		apiv1.SchemeGroupVersion,
-		appsv1.SchemeGroupVersion,
-		authenticationv1.SchemeGroupVersion,
-		authenticationv1beta1.SchemeGroupVersion,
-		authorizationapiv1.SchemeGroupVersion,
-		authorizationapiv1beta1.SchemeGroupVersion,
-		autoscalingapiv1.SchemeGroupVersion,
-		autoscalingapiv2beta1.SchemeGroupVersion,
-		autoscalingapiv2beta2.SchemeGroupVersion,
-		batchapiv1.SchemeGroupVersion,
-		batchapiv1beta1.SchemeGroupVersion,
-		certificatesapiv1.SchemeGroupVersion,
-		certificatesapiv1beta1.SchemeGroupVersion,
-		coordinationapiv1.SchemeGroupVersion,
-		coordinationapiv1beta1.SchemeGroupVersion,
-		discoveryv1.SchemeGroupVersion,
-		discoveryv1beta1.SchemeGroupVersion,
-		eventsv1.SchemeGroupVersion,
-		eventsv1beta1.SchemeGroupVersion,
-		extensionsapiv1beta1.SchemeGroupVersion,
-		networkingapiv1.SchemeGroupVersion,
-		networkingapiv1beta1.SchemeGroupVersion,
-		nodev1.SchemeGroupVersion,
-		nodev1beta1.SchemeGroupVersion,
-		policyapiv1.SchemeGroupVersion,
-		policyapiv1beta1.SchemeGroupVersion,
-		rbacv1.SchemeGroupVersion,
-		rbacv1beta1.SchemeGroupVersion,
-		storageapiv1.SchemeGroupVersion,
-		storageapiv1beta1.SchemeGroupVersion,
-		schedulingapiv1beta1.SchemeGroupVersion,
-		schedulingapiv1.SchemeGroupVersion,
-		flowcontrolv1beta1.SchemeGroupVersion,
-	)
-	// enable non-deprecated beta resources in extensions/v1beta1 explicitly so we have a full list of what's possible to serve
-	ret.EnableResources(
-		extensionsapiv1beta1.SchemeGroupVersion.WithResource("ingresses"),
-	)
-	// disable alpha versions explicitly so we have a full list of what's possible to serve
-	ret.DisableVersions(
-		apiserverinternalv1alpha1.SchemeGroupVersion,
-		nodev1alpha1.SchemeGroupVersion,
-		rbacv1alpha1.SchemeGroupVersion,
-		schedulingv1alpha1.SchemeGroupVersion,
-		storageapiv1alpha1.SchemeGroupVersion,
-		flowcontrolv1alpha1.SchemeGroupVersion,
-	)
 
-	return ret
-}
-
-```
-
-
-
-
-## 全局初始化
+### Api全局初始化
 
 在apiserver的起始文件cmd/kube-apiserver/app/server.go中，通过import方式做了大量Group和Version的隐含初始化工作。
 ```Golang
@@ -665,8 +536,159 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	return nil
 }
 ```
-
 完成隐含初始化后，各个api包下的Scheme、Codecs等全局变量就有值了，如包"k8s.io/kubernetes/pkg/api/legacyscheme" 的legacyscheme.Scheme和legacyscheme.Codecs
+
+### apiserver资源版本的自定义配置
+apiserver可以通过--runtime-config启动时参数控制api/all、api/ga、api/beta、api/alpha四种内置API的启用和禁止（一般用在aggregatorServer，普通kubeApiserver不需要）。先确定了server**默认**支持的gv和gvr
+
+### 默认资源版本
+再次回到buildGenericConfig。 APIEnablement.ApplyTo函数最终合并了全局初始化的资源API、自定义资源版本、默认支持的资源版本，决策出要存储到ETCD的最终GVR
+``` Golang
+func buildGenericConfig(
+    // XXX
+    if lastErr = s.APIEnablement.ApplyTo(genericConfig, controlplane.DefaultAPIResourceConfigSource(), legacyscheme.Scheme); lastErr != nil {
+	return
+    }
+    // XXX
+}
+
+// ApplyTo override MergedResourceConfig with defaults and registry
+func (s *APIEnablementOptions) ApplyTo(c *server.Config, defaultResourceConfig *serverstore.ResourceConfig, registry resourceconfig.GroupVersionRegistry) error {
+	// XXX
+	// defaultResourceConfig代表默认资源版本；s.RuntimeConfig代表启动时自定义配置资源版本；registry代表全局初始化资源Api
+	mergedResourceConfig, err := resourceconfig.MergeAPIResourceConfigs(defaultResourceConfig, s.RuntimeConfig, registry)
+	// 设置了genericConfig的MergedResourceConfig
+	c.MergedResourceConfig = mergedResourceConfig
+	// XXX
+}
+
+// DefaultAPIResourceConfigSource returns default configuration for an APIResource.
+func DefaultAPIResourceConfigSource() *serverstorage.ResourceConfig {
+	ret := serverstorage.NewResourceConfig()
+	// NOTE: GroupVersions listed here will be enabled by default. Don't put alpha versions in the list.
+	ret.EnableVersions(
+		admissionregistrationv1.SchemeGroupVersion,
+		admissionregistrationv1beta1.SchemeGroupVersion,
+		apiv1.SchemeGroupVersion,
+		appsv1.SchemeGroupVersion,
+		authenticationv1.SchemeGroupVersion,
+		authenticationv1beta1.SchemeGroupVersion,
+		authorizationapiv1.SchemeGroupVersion,
+		authorizationapiv1beta1.SchemeGroupVersion,
+		autoscalingapiv1.SchemeGroupVersion,
+		autoscalingapiv2beta1.SchemeGroupVersion,
+		autoscalingapiv2beta2.SchemeGroupVersion,
+		batchapiv1.SchemeGroupVersion,
+		batchapiv1beta1.SchemeGroupVersion,
+		certificatesapiv1.SchemeGroupVersion,
+		certificatesapiv1beta1.SchemeGroupVersion,
+		coordinationapiv1.SchemeGroupVersion,
+		coordinationapiv1beta1.SchemeGroupVersion,
+		discoveryv1.SchemeGroupVersion,
+		discoveryv1beta1.SchemeGroupVersion,
+		eventsv1.SchemeGroupVersion,
+		eventsv1beta1.SchemeGroupVersion,
+		extensionsapiv1beta1.SchemeGroupVersion,
+		networkingapiv1.SchemeGroupVersion,
+		networkingapiv1beta1.SchemeGroupVersion,
+		nodev1.SchemeGroupVersion,
+		nodev1beta1.SchemeGroupVersion,
+		policyapiv1.SchemeGroupVersion,
+		policyapiv1beta1.SchemeGroupVersion,
+		rbacv1.SchemeGroupVersion,
+		rbacv1beta1.SchemeGroupVersion,
+		storageapiv1.SchemeGroupVersion,
+		storageapiv1beta1.SchemeGroupVersion,
+		schedulingapiv1beta1.SchemeGroupVersion,
+		schedulingapiv1.SchemeGroupVersion,
+		flowcontrolv1beta1.SchemeGroupVersion,
+	)
+	// enable non-deprecated beta resources in extensions/v1beta1 explicitly so we have a full list of what's possible to serve
+	ret.EnableResources(
+		extensionsapiv1beta1.SchemeGroupVersion.WithResource("ingresses"),
+	)
+	// disable alpha versions explicitly so we have a full list of what's possible to serve
+	ret.DisableVersions(
+		apiserverinternalv1alpha1.SchemeGroupVersion,
+		nodev1alpha1.SchemeGroupVersion,
+		rbacv1alpha1.SchemeGroupVersion,
+		schedulingv1alpha1.SchemeGroupVersion,
+		storageapiv1alpha1.SchemeGroupVersion,
+		flowcontrolv1alpha1.SchemeGroupVersion,
+	)
+
+	return ret
+}
+
+```
+
+### GVR存储时转换
+
+StorageFactoryRestOptionsFactory的核心是StorageFactory，StorageFactory接口由DefaultStorageFactory对象实现。而DefaultStorageFactory对象则在buildGenericConfig的completedStorageFactoryConfig.New()被创建。
+```Golang
+// StorageFactory is the interface to locate the storage for a given GroupResource
+type StorageFactory interface {
+        // 存储到ETCD中的各种参数，包括但不限于是否所有key的统一前缀、是否分页、etcd server的连接参数、编解码、Compaction时间间隔、健康检查、租约等
+	// New finds the storage destination for the given group and resource. It will
+	// return an error if the group has no storage destination configured.
+	NewConfig(groupResource schema.GroupResource) (*storagebackend.Config, error)
+
+        // 返回该GroupResource的存储在ETCD中的特定前缀。选择的优先顺序是该GroupResource精确的前缀 > 该Group的前缀（Resource为"*"）> Resource的小写
+	// ResourcePrefix returns the overridden resource prefix for the GroupResource
+	// This allows for cohabitation of resources with different native types and provides
+	// centralized control over the shape of etcd directories
+	ResourcePrefix(groupResource schema.GroupResource) string
+
+        // ETCD的server URL和TLS配置
+	// Backends gets all backends for all registered storage destinations.
+	// Used for getting all instances for health validations.
+	Backends() []Backend
+}
+
+// New finds the storage destination for the given group and resource. It will
+// return an error if the group has no storage destination configured.
+func (s *DefaultStorageFactory) NewConfig(groupResource schema.GroupResource) (*storagebackend.Config, error) {
+        // 按completedStorageFactoryConfig.New()定义的顺序，处理同一种Resource真正选择存储哪个Group到ETCD，比如apps.deployments和extensions.deployments
+	chosenStorageResource := s.getStorageGroupResource(groupResource)
+
+
+	// operate on copy。Factory只有一个，但每种GroupResource都重新copy一个新的配置
+	storageConfig := s.StorageConfig
+	codecConfig := StorageCodecConfig{
+		StorageMediaType:  s.DefaultMediaType,
+		StorageSerializer: s.DefaultSerializer,
+	}
+
+        // 精确的GroupResource的ETCD配置选项会覆盖模糊的Group(Resource为"*")
+	if override, ok := s.Overrides[getAllResourcesAlias(chosenStorageResource)]; ok {
+		override.Apply(&storageConfig, &codecConfig)
+	}
+	if override, ok := s.Overrides[chosenStorageResource]; ok {
+		override.Apply(&storageConfig, &codecConfig)
+	}
+
+	// 确定ETCD中的版本
+	codecConfig.StorageVersion, err = s.ResourceEncodingConfig.StorageEncodingFor(chosenStorageResource)
+	if err != nil {
+		return nil, err
+	}
+	// 确定内存中的版本
+	codecConfig.MemoryVersion, err = s.ResourceEncodingConfig.InMemoryEncodingFor(groupResource)
+	if err != nil {
+		return nil, err
+	}
+	codecConfig.Config = storageConfig
+
+	storageConfig.Codec, storageConfig.EncodeVersioner, err = s.newStorageCodecFn(codecConfig)
+	if err != nil {
+		return nil, err
+	}
+	klog.V(3).Infof("storing %v in %v, reading as %v from %#v", groupResource, codecConfig.StorageVersion, codecConfig.MemoryVersion, codecConfig.Config)
+
+	return &storageConfig, nil
+}
+
+```
 
 
 http请求的handler链：DefaultBuildHandlerChain
