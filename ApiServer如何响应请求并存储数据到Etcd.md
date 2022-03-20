@@ -6,6 +6,21 @@ ApiServer中一个资源变更请求要经历的完整流程主要包括认证(A
 --disable-admission-plugins=PodNodeSelector,AlwaysDeny ...
 
 TODO：三个apiserver的关系
+
+gvk转换
+```Golang
+
+KubeAPIServer
+	encodeVersioner := runtime.NewMultiGroupVersioner(
+		opts.StorageVersion,
+		schema.GroupKind{Group: opts.StorageVersion.Group},
+		schema.GroupKind{Group: opts.MemoryVersion.Group},
+	)
+APIExtensionsServer
+etcdOptions.StorageConfig.EncodeVersioner = runtime.NewMultiGroupVersioner(v1beta1.SchemeGroupVersion, schema.GroupKind{Group: v1beta1.GroupName})
+```
+
+
 # 实现
 为了完整分析一个Server的请求处理流程，先忽略Server链中另外的ApiExtensionsServer和AggregatorServer。下面只以普通的KubeApiserver为例
 ## 构建服务配置
@@ -103,7 +118,7 @@ type Config struct {
 	RESTOptionsGetter genericregistry.RESTOptionsGetter
 }
 
-// 关键的配置函数
+// 关键的配置函数，整个函数都是在做genericConfig的配置
 // BuildGenericConfig takes the master server options and produces the genericapiserver.Config associated with it
 func buildGenericConfig(
 	s *options.ServerRunOptions,
@@ -117,7 +132,6 @@ func buildGenericConfig(
 	storageFactory *serverstorage.DefaultStorageFactory,
 	lastErr error,
 ) {
-    // 整个函数都是在做genericConfig的配置
     genericConfig = genericapiserver.NewConfig(legacyscheme.Codecs)
     genericConfig.MergedResourceConfig = controlplane.DefaultAPIResourceConfigSource()
     
@@ -155,9 +169,9 @@ func buildGenericConfig(
 ```
 下面针对不同的流程来分别介绍buildGenericConfig的细节。
 
-## http Server响应流程
+## 完整的http处理流程
 
-定义了完整的http请求处理流程
+buildGenericConfig首先定义了http handler链DefaultBuildHandlerChain
 ```Golang
 // NewConfig returns a Config struct with the default values
 func NewConfig(codecs serializer.CodecFactory) *Config {
@@ -208,8 +222,8 @@ func NewConfig(codecs serializer.CodecFactory) *Config {
 	}
 }
 
+// handler处理的顺序和此函数中定义的顺序一致
 func DefaultBuildHandlerChain(apiHandler http.Handler, c *Config) http.Handler {
-	// handler处理的顺序和此处定义的顺序一致
 	// 授权
 	handler = genericapifilters.WithAuthorization(handler, c.Authorization.Authorizer, c.Serializer)
 	
@@ -715,30 +729,200 @@ func (s *DefaultStorageFactory) ResourcePrefix(groupResource schema.GroupResourc
 }
 ```
 
+## 构建http Server
 
-http请求的handler链：DefaultBuildHandlerChain
-
-
-// FullHandlerChain -> Director -> {
-GoRestfulContainer,NonGoRestfulMux} based on inspection of registered web services
-type APIServerHandler struct {
-
-
-gvk转换
+回到CreateServerChain，CreateKubeAPIServer函数根据之前的Config创建kubeAPIServer实例对象，
 ```Golang
+// CreateKubeAPIServer creates and wires a workable kube-apiserver
+func CreateKubeAPIServer(kubeAPIServerConfig *controlplane.Config, delegateAPIServer genericapiserver.DelegationTarget) (*controlplane.Instance, error) {
+	kubeAPIServer, err := kubeAPIServerConfig.Complete().New(delegateAPIServer)
+	// XXX
+	return kubeAPIServer, nil
+}
 
-KubeAPIServer
-	encodeVersioner := runtime.NewMultiGroupVersioner(
-		opts.StorageVersion,
-		schema.GroupKind{Group: opts.StorageVersion.Group},
-		schema.GroupKind{Group: opts.MemoryVersion.Group},
-	)
-APIExtensionsServer
-etcdOptions.StorageConfig.EncodeVersioner = runtime.NewMultiGroupVersioner(v1beta1.SchemeGroupVersion, schema.GroupKind{Group: v1beta1.GroupName})
+// New returns a new instance of Master from the given config.
+// Certain config fields will be set to a default value if unset.
+// Certain config fields must be specified, including:
+//   KubeletClientConfig
+func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget) (*Instance, error) {
+	// XXX
+	// 创建GenericAPIServer对象，可以传入代理对象
+	s, err := c.GenericConfig.New("kube-apiserver", delegationTarget)
+	if err != nil {
+		return nil, err
+	}
+	// XXX
+	m := &Instance{
+		GenericAPIServer:          s,
+		ClusterAuthenticationInfo: c.ExtraConfig.ClusterAuthenticationInfo,
+	}
 
-	
+	// install legacy rest storage
+	if c.ExtraConfig.APIResourceConfigSource.VersionEnabled(apiv1.SchemeGroupVersion) {
+		legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{
+			StorageFactory:              c.ExtraConfig.StorageFactory,
+			ProxyTransport:              c.ExtraConfig.ProxyTransport,
+			KubeletClientConfig:         c.ExtraConfig.KubeletClientConfig,
+			EventTTL:                    c.ExtraConfig.EventTTL,
+			ServiceIPRange:              c.ExtraConfig.ServiceIPRange,
+			SecondaryServiceIPRange:     c.ExtraConfig.SecondaryServiceIPRange,
+			ServiceNodePortRange:        c.ExtraConfig.ServiceNodePortRange,
+			LoopbackClientConfig:        c.GenericConfig.LoopbackClientConfig,
+			ServiceAccountIssuer:        c.ExtraConfig.ServiceAccountIssuer,
+			ExtendExpiration:            c.ExtraConfig.ExtendExpiration,
+			ServiceAccountMaxExpiration: c.ExtraConfig.ServiceAccountMaxExpiration,
+			APIAudiences:                c.GenericConfig.Authentication.APIAudiences,
+		}
+		if err := m.InstallLegacyAPI(&c, c.GenericConfig.RESTOptionsGetter, legacyRESTStorageProvider); err != nil {
+			return nil, err
+		}
+	}
+
+	// The order here is preserved in discovery.
+	// If resources with identical names exist in more than one of these groups (e.g. "deployments.apps"" and "deployments.extensions"),
+	// the order of this list determines which group an unqualified resource name (e.g. "deployments") should prefer.
+	// This priority order is used for local discovery, but it ends up aggregated in `k8s.io/kubernetes/cmd/kube-apiserver/app/aggregator.go
+	// with specific priorities.
+	// TODO: describe the priority all the way down in the RESTStorageProviders and plumb it back through the various discovery
+	// handlers that we have.
+	restStorageProviders := []RESTStorageProvider{
+		apiserverinternalrest.StorageProvider{},
+		authenticationrest.RESTStorageProvider{Authenticator: c.GenericConfig.Authentication.Authenticator, APIAudiences: c.GenericConfig.Authentication.APIAudiences},
+		authorizationrest.RESTStorageProvider{Authorizer: c.GenericConfig.Authorization.Authorizer, RuleResolver: c.GenericConfig.RuleResolver},
+		autoscalingrest.RESTStorageProvider{},
+		batchrest.RESTStorageProvider{},
+		certificatesrest.RESTStorageProvider{},
+		coordinationrest.RESTStorageProvider{},
+		discoveryrest.StorageProvider{},
+		extensionsrest.RESTStorageProvider{},
+		networkingrest.RESTStorageProvider{},
+		noderest.RESTStorageProvider{},
+		policyrest.RESTStorageProvider{},
+		rbacrest.RESTStorageProvider{Authorizer: c.GenericConfig.Authorization.Authorizer},
+		schedulingrest.RESTStorageProvider{},
+		storagerest.RESTStorageProvider{},
+		flowcontrolrest.RESTStorageProvider{},
+		// keep apps after extensions so legacy clients resolve the extensions versions of shared resource names.
+		// See https://github.com/kubernetes/kubernetes/issues/42392
+		appsrest.StorageProvider{},
+		admissionregistrationrest.RESTStorageProvider{},
+		eventsrest.RESTStorageProvider{TTL: c.ExtraConfig.EventTTL},
+	}
+	if err := m.InstallAPIs(c.ExtraConfig.APIResourceConfigSource, c.GenericConfig.RESTOptionsGetter, restStorageProviders...); err != nil {
+		return nil, err
+	}
+
+	m.GenericAPIServer.AddPostStartHookOrDie("start-cluster-authentication-info-controller", func(hookContext genericapiserver.PostStartHookContext) error {
+		kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
+		if err != nil {
+			return err
+		}
+		controller := clusterauthenticationtrust.NewClusterAuthenticationTrustController(m.ClusterAuthenticationInfo, kubeClient)
+
+		// prime values and start listeners
+		if m.ClusterAuthenticationInfo.ClientCA != nil {
+			m.ClusterAuthenticationInfo.ClientCA.AddListener(controller)
+			if controller, ok := m.ClusterAuthenticationInfo.ClientCA.(dynamiccertificates.ControllerRunner); ok {
+				// runonce to be sure that we have a value.
+				if err := controller.RunOnce(); err != nil {
+					runtime.HandleError(err)
+				}
+				go controller.Run(1, hookContext.StopCh)
+			}
+		}
+		if m.ClusterAuthenticationInfo.RequestHeaderCA != nil {
+			m.ClusterAuthenticationInfo.RequestHeaderCA.AddListener(controller)
+			if controller, ok := m.ClusterAuthenticationInfo.RequestHeaderCA.(dynamiccertificates.ControllerRunner); ok {
+				// runonce to be sure that we have a value.
+				if err := controller.RunOnce(); err != nil {
+					runtime.HandleError(err)
+				}
+				go controller.Run(1, hookContext.StopCh)
+			}
+		}
+
+		go controller.Run(1, hookContext.StopCh)
+		return nil
+	})
+
+	if utilfeature.DefaultFeatureGate.Enabled(apiserverfeatures.APIServerIdentity) {
+		m.GenericAPIServer.AddPostStartHookOrDie("start-kube-apiserver-identity-lease-controller", func(hookContext genericapiserver.PostStartHookContext) error {
+			kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
+			if err != nil {
+				return err
+			}
+			controller := lease.NewController(
+				clock.RealClock{},
+				kubeClient,
+				m.GenericAPIServer.APIServerID,
+				int32(c.ExtraConfig.IdentityLeaseDurationSeconds),
+				nil,
+				time.Duration(c.ExtraConfig.IdentityLeaseRenewIntervalSeconds)*time.Second,
+				metav1.NamespaceSystem,
+				labelAPIServerHeartbeat)
+			go controller.Run(wait.NeverStop)
+			return nil
+		})
+		m.GenericAPIServer.AddPostStartHookOrDie("start-kube-apiserver-identity-lease-garbage-collector", func(hookContext genericapiserver.PostStartHookContext) error {
+			kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
+			if err != nil {
+				return err
+			}
+			go apiserverleasegc.NewAPIServerLeaseGC(
+				kubeClient,
+				time.Duration(c.ExtraConfig.IdentityLeaseDurationSeconds)*time.Second,
+				metav1.NamespaceSystem,
+				KubeAPIServerIdentityLeaseLabelSelector,
+			).Run(wait.NeverStop)
+			return nil
+		})
+	}
+
+	return m, nil
+}
 ```
 
+NewAPIServerHandler将delegationTarget的handler和当前的handler穿成一个链
+```Golang
+// New creates a new server which logically combines the handling chain with the passed server.
+// name is used to differentiate for logging. The handler chain in particular can be difficult as it starts delegating.
+// delegationTarget may not be nil.
+func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*GenericAPIServer, error) {
+	// XXX
+	handlerChainBuilder := func(handler http.Handler) http.Handler {
+	        // BuildHandlerChainFunc就是前面<<http Server响应流程>>一节中的http handler链：DefaultBuildHandlerChain，
+		return c.BuildHandlerChainFunc(handler, c.Config)
+	}
+	// 传入delegationTarget的handler
+	apiServerHandler := NewAPIServerHandler(name, c.Serializer, handlerChainBuilder, delegationTarget.UnprotectedHandler())
+	
+	s := &GenericAPIServer{
+	        // XXX
+		delegationTarget:           delegationTarget,
+		Handler: apiServerHandler,
+		listedPathProvider: apiServerHandler,
+	}
+	// XXX
+	s.listedPathProvider = routes.ListedPathProviders{s.listedPathProvider, delegationTarget}
+
+	installAPI(s, c.Config)
+
+	// use the UnprotectedHandler from the delegation target to ensure that we don't attempt to double authenticator, authorize,
+	// or some other part of the filter chain in delegation cases.
+	if delegationTarget.UnprotectedHandler() == nil && c.EnableIndex {
+	        // 正常的NotFound由delegationTarget处理，如果它的handler为空，则设置NotFound的handler返回404
+		s.Handler.NonGoRestfulMux.NotFoundHandler(routes.IndexLister{
+			StatusCode:   http.StatusNotFound,
+			PathProvider: s.listedPathProvider,
+		})
+	}
+
+	return s, nil
+}
+```
+
+APIServerHandler由三部分组成，其中GoRestfulContainer真实是一个开源库的WebService，Director作为handler代理组合了GoRestfulContainer和NonGoRestfulMux的内部处理细节。
+```
 // FullHandlerChain -> Director -> {GoRestfulContainer,NonGoRestfulMux} based on inspection of registered web services
 type APIServerHandler struct {
 	// FullHandlerChain is the one that is eventually served with.  It should include the full filter
@@ -766,3 +950,85 @@ type APIServerHandler struct {
 	// Other servers should only use this opaquely to delegate to an API server.
 	Director http.Handler
 }
+```
+
+传入的notFoundHandler是delegationTarget.UnprotectedHandler()，delegationTarget也是一个GenericAPIServer对象，UnprotectedHandler函数内部也是delegationTarget的Director，最终形成完整的Director handler链
+```Golang
+func NewAPIServerHandler(name string, s runtime.NegotiatedSerializer, handlerChainBuilder HandlerChainBuilderFn, notFoundHandler http.Handler) *APIServerHandler {
+	nonGoRestfulMux := mux.NewPathRecorderMux(name)
+	if notFoundHandler != nil {
+		nonGoRestfulMux.NotFoundHandler(notFoundHandler)
+	}
+
+	gorestfulContainer := restful.NewContainer()
+	gorestfulContainer.ServeMux = http.NewServeMux()
+	gorestfulContainer.Router(restful.CurlyRouter{}) // e.g. for proxy/{kind}/{name}/{*}
+	gorestfulContainer.RecoverHandler(func(panicReason interface{}, httpWriter http.ResponseWriter) {
+		logStackOnRecover(s, panicReason, httpWriter)
+	})
+	gorestfulContainer.ServiceErrorHandler(func(serviceErr restful.ServiceError, request *restful.Request, response *restful.Response) {
+		serviceErrorHandler(s, serviceErr, request, response)
+	})
+
+	director := director{
+		name:               name,
+		goRestfulContainer: gorestfulContainer,
+		nonGoRestfulMux:    nonGoRestfulMux,
+	}
+
+	return &APIServerHandler{
+		FullHandlerChain:   handlerChainBuilder(director),
+		GoRestfulContainer: gorestfulContainer,
+		NonGoRestfulMux:    nonGoRestfulMux,
+		Director:           director,
+	}
+}
+
+func (s *GenericAPIServer) UnprotectedHandler() http.Handler {
+	// when we delegate, we need the server we're delegating to choose whether or not to use gorestful
+	return s.Handler.Director
+}
+```
+
+APIServerHandler第一道handle是FullHandlerChain，它被Direcotr赋值；director是先过goRestfulContainer，再过nonGoRestfulMux，既当前的GenericAPIServer处理不了就委托给下一个GenericAPIServer处理
+```
+// ServeHTTP makes it an http.Handler
+func (a *APIServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	a.FullHandlerChain.ServeHTTP(w, r)
+}
+
+func (d director) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	path := req.URL.Path
+
+	// check to see if our webservices want to claim this path
+	for _, ws := range d.goRestfulContainer.RegisteredWebServices() {
+		switch {
+		case ws.RootPath() == "/apis":
+			// if we are exactly /apis or /apis/, then we need special handling in loop.
+			// normally these are passed to the nonGoRestfulMux, but if discovery is enabled, it will go directly.
+			// We can't rely on a prefix match since /apis matches everything (see the big comment on Director above)
+			if path == "/apis" || path == "/apis/" {
+				klog.V(5).Infof("%v: %v %q satisfied by gorestful with webservice %v", d.name, req.Method, path, ws.RootPath())
+				// don't use servemux here because gorestful servemuxes get messed up when removing webservices
+				// TODO fix gorestful, remove TPRs, or stop using gorestful
+				d.goRestfulContainer.Dispatch(w, req)
+				return
+			}
+
+		case strings.HasPrefix(path, ws.RootPath()):
+			// ensure an exact match or a path boundary match
+			if len(path) == len(ws.RootPath()) || path[len(ws.RootPath())] == '/' {
+				klog.V(5).Infof("%v: %v %q satisfied by gorestful with webservice %v", d.name, req.Method, path, ws.RootPath())
+				// don't use servemux here because gorestful servemuxes get messed up when removing webservices
+				// TODO fix gorestful, remove TPRs, or stop using gorestful
+				d.goRestfulContainer.Dispatch(w, req)
+				return
+			}
+		}
+	}
+
+	// if we didn't find a match, then we just skip gorestful altogether
+	klog.V(5).Infof("%v: %v %q satisfied by nonGoRestful", d.name, req.Method, path)
+	d.nonGoRestfulMux.ServeHTTP(w, req)
+}
+```
