@@ -20,7 +20,6 @@ APIExtensionsServer
 etcdOptions.StorageConfig.EncodeVersioner = runtime.NewMultiGroupVersioner(v1beta1.SchemeGroupVersion, schema.GroupKind{Group: v1beta1.GroupName})
 ```
 
-
 # 实现
 为了完整分析一个Server的请求处理流程，先忽略Server链中另外的ApiExtensionsServer和AggregatorServer。下面只以普通的KubeApiserver为例
 ## 构建服务配置
@@ -916,8 +915,20 @@ func (d director) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 ```
 
-## 安装API router
-再次回到kubeAPIServerConfig.Complete().New(delegateAPIServer).
+## 安装API Routes
+**k8s的API分三种**：
+1. core API（又称legacy API）:路径是/api/v1
+2. named group API:路径是/apis/${GROUP}/${VERSION}
+3. discovery API(待验证):路径是/apis/${GROUP}  
+4. others API:路径是/metrics, /healthz，/version等
+</br>
+
+**Resource的路径命名规则是**：
+1. 无namespace: 如/apis/${GROUP}/${VERSION}/resource/${NAME}
+2. 有namespace: 如/apis/${GROUP}/${VERSION}/namespaces/${NAMESPACE}/resource/${NAME}
+</br>
+
+再次回到kubeAPIServerConfig.Complete().New(delegateAPIServer)。安装API Route分legacy和普通group两个阶段
 ```Golang
 func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget) (*Instance, error) {
 	// 创建GenericAPIServer对象，构建Handler链
