@@ -919,8 +919,8 @@ func (d director) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 **k8s的API分三种**：
 1. core API（又称legacy API）:路径是/api/v1
 2. named group API:路径是/apis/${GROUP}/${VERSION}
-3. discovery API(待验证):路径是/apis/${GROUP}  
-4. others API:路径是/metrics, /healthz，/version等
+3. discovery API(待验证):针对1和2，路径分别是/api和/apis/${GROUP} 
+4. others API:路径是/metrics,/healthz,/version,/(根路径),/debug等
 </br>
 
 **Resource的路径命名规则是**：
@@ -928,10 +928,14 @@ func (d director) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 2. 有namespace: 如/apis/${GROUP}/${VERSION}/namespaces/${NAMESPACE}/resource/${NAME}
 </br>
 
-再次回到kubeAPIServerConfig.Complete().New(delegateAPIServer)。安装API Route分legacy和普通group两个阶段
+再次回到kubeAPIServerConfig.Complete().New(delegateAPIServer)。安装资源API Route分legacy和普通group两个阶段。
 ```Golang
 func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget) (*Instance, error) {
 	// 创建GenericAPIServer对象，构建Handler链
+	// XXX
+	
+	// 下面介绍
+	s, err := c.GenericConfig.New("kube-apiserver", delegationTarget)
 	// XXX
 	
 	// install legacy rest storage
@@ -1002,6 +1006,7 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 	
 	s.listedPathProvider = routes.ListedPathProviders{s.listedPathProvider, delegationTarget}
 
+        // 安装others API
 	installAPI(s, c.Config)
 
         // 设置handler链的默认NotFound处理函数
@@ -1010,3 +1015,222 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 	return s, nil
 }
 ```
+
+```Golang
+// InstallLegacyAPI will install the legacy APIs for the restStorageProviders if they are enabled.
+func (m *Instance) InstallLegacyAPI(c *completedConfig, restOptionsGetter generic.RESTOptionsGetter, legacyRESTStorageProvider corerest.LegacyRESTStorageProvider) error {
+        // 返回的LegacyRESTStorage保存用RangeAllocation对象描述的集群全局的Range分配信息，比如CIDR范围，主机端口号等
+	// legacy API的group内部用空串""表示，apiGroupInfo保存了关于legacy API全部的version->resource->storage关系，storage封装了各种resource的增删查改细节
+	legacyRESTStorage, apiGroupInfo, err := legacyRESTStorageProvider.NewLegacyRESTStorage(restOptionsGetter)
+	// XX
+
+        // 创建负责维护集群系统级namespace和service的controller
+	controllerName := "bootstrap-controller"
+	coreClient := corev1client.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
+	bootstrapController := c.NewBootstrapController(legacyRESTStorage, coreClient, coreClient, coreClient, coreClient.RESTClient())
+	m.GenericAPIServer.AddPostStartHookOrDie(controllerName, bootstrapController.PostStartHook)
+	m.GenericAPIServer.AddPreShutdownHookOrDie(controllerName, bootstrapController.PreShutdownHook)
+
+        // DefaultLegacyAPIPrefix是/api
+	if err := m.GenericAPIServer.InstallLegacyAPIGroup(genericapiserver.DefaultLegacyAPIPrefix, &apiGroupInfo); err != nil {
+		return fmt.Errorf("error in registering group versions: %v", err)
+	}
+	return nil
+}
+
+func (s *GenericAPIServer) InstallLegacyAPIGroup(apiPrefix string, apiGroupInfo *APIGroupInfo) error {
+	// XXX
+	
+	if err := s.installAPIResources(apiPrefix, apiGroupInfo, openAPIModels); err != nil {
+		return err
+	}
+
+        // 安装legacy API的discovery API之一，如/api，返回的是/api下的所有版本
+	// Install the version handler.
+	// Add a handler at /<apiPrefix> to enumerate the supported api versions.
+	s.Handler.GoRestfulContainer.Add(discovery.NewLegacyRootAPIHandler(s.discoveryAddresses, s.Serializer, apiPrefix).WebService())
+
+	return nil
+}
+
+// installAPIResources is a private method for installing the REST storage backing each api groupversionresource
+func (s *GenericAPIServer) installAPIResources(apiPrefix string, apiGroupInfo *APIGroupInfo, openAPIModels openapiproto.Models) error {
+	var resourceInfos []*storageversion.ResourceInfo
+	// 遍历该group下的每个version，分别注册各种资源的api
+	for _, groupVersion := range apiGroupInfo.PrioritizedVersions {
+		if len(apiGroupInfo.VersionedResourcesStorageMap[groupVersion.Version]) == 0 {
+			klog.Warningf("Skipping API %v because it has no resources.", groupVersion)
+			continue
+		}
+                
+		// 返回helper结构，主要保存了安装http handler过程中要用到的所有信息，包括restStorage
+		apiGroupVersion := s.getAPIGroupVersion(apiGroupInfo, groupVersion, apiPrefix)
+		// XXX
+		
+		r, err := apiGroupVersion.InstallREST(s.Handler.GoRestfulContainer)
+		if err != nil {
+			return fmt.Errorf("unable to setup API %v: %v", apiGroupInfo, err)
+		}
+		resourceInfos = append(resourceInfos, r...)
+	}
+	// XXX
+	return nil
+}
+
+// InstallREST registers the REST handlers (storage, watch, proxy and redirect) into a restful Container.
+// It is expected that the provided path root prefix will serve all operations. Root MUST NOT end
+// in a slash.
+func (g *APIGroupVersion) InstallREST(container *restful.Container) ([]*storageversion.ResourceInfo, error) {
+	prefix := path.Join(g.Root, g.GroupVersion.Group, g.GroupVersion.Version)
+	installer := &APIInstaller{
+		group:             g, // 带着helper对象APIGroupVersion
+		prefix:            prefix,  // 下面安装每种resource API时的webservice前缀已经是/api/${GROUP}/${VERSION}
+		minRequestTimeout: g.MinRequestTimeout,
+	}
+
+	apiResources, resourceInfos, ws, registrationErrors := installer.Install()
+	versionDiscoveryHandler := discovery.NewAPIVersionHandler(g.Serializer, g.GroupVersion, staticLister{apiResources})
+	// 安装legacy API的另一个discovery API，如/api/v1, 返回的是/api/v1下的所有资源（legacy api只有一个v1版本）
+	versionDiscoveryHandler.AddToWebService(ws)
+	container.Add(ws)
+	return removeNonPersistedResources(resourceInfos), utilerrors.NewAggregate(registrationErrors)
+}
+
+// Install handlers for API resources.
+func (a *APIInstaller) Install() ([]metav1.APIResource, []*storageversion.ResourceInfo, *restful.WebService, []error) {
+	// XXX
+	// 用上面installer传入的prefix初始化，所以下面安装的都是resource API
+	ws := a.newWebService()
+
+	// Register the paths in a deterministic (sorted) order to get a deterministic swagger spec.
+	paths := make([]string, len(a.group.Storage))
+	var i int = 0
+	for path := range a.group.Storage {
+		paths[i] = path
+		i++
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+	        // 遍历每周resource，path就是Resource
+		apiResource, resourceInfo, err := a.registerResourceHandlers(path, a.group.Storage[path], ws)
+		// XXX
+	}
+	return apiResources, resourceInfos, ws, errors
+}
+
+func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storage, ws *restful.WebService) (*metav1.APIResource, *storageversion.ResourceInfo, error) {
+        // XX
+	
+	// resource有可能带着subresource
+	resource, subresource, err := splitSubresource(path)
+	// XXX
+	
+        // 获取resource对应的GVK,不太明白下面多个类似的操作怎么做的？
+	fqKindToRegister, err := GetResourceKind(a.group.GroupVersion, storage, a.group.Typer)
+	// XX
+	versionedPtr, err := a.group.Creater.New(fqKindToRegister)
+	// XX
+	defaultVersionedObject := indirectArbitraryPointer(versionedPtr)
+	//XX
+	
+	// 判断有对象支持哪些增删查改操作
+	// what verbs are supported by the storage, used to know what verbs we support per path
+	creater, isCreater := storage.(rest.Creater)
+	namedCreater, isNamedCreater := storage.(rest.NamedCreater)
+	lister, isLister := storage.(rest.Lister)
+	getter, isGetter := storage.(rest.Getter)
+	getterWithOptions, isGetterWithOptions := storage.(rest.GetterWithOptions)
+	gracefulDeleter, isGracefulDeleter := storage.(rest.GracefulDeleter)
+	collectionDeleter, isCollectionDeleter := storage.(rest.CollectionDeleter)
+	updater, isUpdater := storage.(rest.Updater)
+	patcher, isPatcher := storage.(rest.Patcher)
+	watcher, isWatcher := storage.(rest.Watcher)
+	connecter, isConnecter := storage.(rest.Connecter)
+	storageMeta, isMetadata := storage.(rest.StorageMetadata)
+	storageVersionProvider, isStorageVersionProvider := storage.(rest.StorageVersionProvider)
+	gvAcceptor, _ := storage.(rest.GroupVersionAcceptor)
+	// XXX
+	
+	// 根据resource是否是namespace的拼接API路径，流程基本相同
+	// Get the list of actions for the given scope.
+	switch {
+	case !namespaceScoped:
+		// 非namespace的路径是/${PREFIX}/{GROUP}/${VERSION}/resource/${RESOURCE}
+		// 选择添加action的Verb
+		// Handler for standard REST verbs (GET, PUT, POST and DELETE).
+		// Add actions at the resource path: /api/apiVersion/resource
+		actions = appendIf(actions, action{"LIST", resourcePath, resourceParams, namer, false}, isLister)
+		actions = appendIf(actions, action{"POST", resourcePath, resourceParams, namer, false}, isCreater)
+		actions = appendIf(actions, action{"DELETECOLLECTION", resourcePath, resourceParams, namer, false}, isCollectionDeleter)
+		// DEPRECATED in 1.11
+		actions = appendIf(actions, action{"WATCHLIST", "watch/" + resourcePath, resourceParams, namer, false}, allowWatchList)
+
+		// Add actions at the item path: /api/apiVersion/resource/{name}
+		actions = appendIf(actions, action{"GET", itemPath, nameParams, namer, false}, isGetter)
+		if getSubpath {
+			actions = appendIf(actions, action{"GET", itemPath + "/{path:*}", proxyParams, namer, false}, isGetter)
+		}
+		actions = appendIf(actions, action{"PUT", itemPath, nameParams, namer, false}, isUpdater)
+		actions = appendIf(actions, action{"PATCH", itemPath, nameParams, namer, false}, isPatcher)
+		actions = appendIf(actions, action{"DELETE", itemPath, nameParams, namer, false}, isGracefulDeleter)
+		// DEPRECATED in 1.11
+		actions = appendIf(actions, action{"WATCH", "watch/" + itemPath, nameParams, namer, false}, isWatcher)
+		actions = appendIf(actions, action{"CONNECT", itemPath, nameParams, namer, false}, isConnecter)
+		actions = appendIf(actions, action{"CONNECT", itemPath + "/{path:*}", proxyParams, namer, false}, isConnecter && connectSubpath)
+	default:
+	        // namespace的路径是/${PREFIX}/{GROUP}/${VERSION}/namespaces/${NAMESPACE}/resource/${RESOURCE}
+		// XXX
+	}
+	
+	for _, action := range actions {
+		// XXX
+		routes := []*restful.RouteBuilder{}
+		// XXX
+		switch action.Verb {
+		case "GET": // Get a resource.
+			var handler restful.RouteFunction
+			// XX
+			// getter就是storage.(rest.Getter)
+			handler = restfulGetResource(getter, reqScope)
+			// XX handler的各种装饰器
+			route := ws.GET(action.Path).To(handler).
+				Doc(doc).
+				Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
+				Operation("read"+namespaced+kind+strings.Title(subresource)+operationSuffix).
+				Produces(append(storageMeta.ProducesMIMETypes(action.Verb), mediaTypes...)...).
+				Returns(http.StatusOK, "OK", producedObject).
+				Writes(producedObject)
+			// XX
+			routes = append(routes, route)
+		case "LIST": // List all resources of a kind.
+			// XX
+		case "PUT":
+		// XXX
+		for _, route := range routes {
+			// XX
+			ws.Route(route)
+		}
+	}
+	// XX
+	// Record the existence of the GVR and the corresponding GVK
+	a.group.EquivalentResourceRegistry.RegisterKindFor(reqScope.Resource, reqScope.Subresource, fqKindToRegister)
+
+	return &apiResource, resourceInfo, nil
+}
+```
+
+genericapiserver.APIGroupInfo，
+PrioritizedVersions 提前注册的scheme已经有该group支持的version
+VersionedResourcesStorageMap是该group下，version->resource->storage关系，storage封装了各种resource的增删查改细节，跟后端存储有关
+apiGroupInfo := genericapiserver.APIGroupInfo{
+		PrioritizedVersions:          legacyscheme.Scheme.PrioritizedVersionsForGroup(""),
+		VersionedResourcesStorageMap: map[string]map[string]rest.Storage{},
+		Scheme:                       legacyscheme.Scheme,
+		ParameterCodec:               legacyscheme.ParameterCodec,
+		NegotiatedSerializer:         legacyscheme.Codecs,
+	}
+	
+	
+// if EncodingVersion is empty, then the apiserver does not
+		// need to register this resource via the storage version API,
+		// thus we can remove it.
