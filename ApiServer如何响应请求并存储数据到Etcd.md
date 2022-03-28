@@ -1230,14 +1230,14 @@ type RESTStorageProvider interface {
 ```
 
 NewRESTStorage是用来初始化APIGroupInfo的。APIGroupInfo包含了对每个Group可以持久化的version，以及不同resource的storage结构。
-两个关键的字段如下，其中VersionedResourcesStorageMap中的storage包含每个resource具体的REST和StatusREST对象
+两个关键的字段如下，其中VersionedResourcesStorageMap中的storage接口就是每个resource具体的REST和StatusREST对象实现
 
 ```Golang
 // Info about an API group.
 type APIGroupInfo struct {
-        // 该group对应的version
+        // 代码初始化时提前注册的scheme已经有该group支持的version
 	PrioritizedVersions []schema.GroupVersion
-	// 该grouo下针对某version+某resource对应的storage
+	// 是该group下，version->resource->storage关系，storage封装了各种resource的增删查改细节，跟后端存储有关
 	// Info about the resources in this group. It's a map from version to resource to the storage.
 	VersionedResourcesStorageMap map[string]map[string]rest.Storage
 	// XXX 
@@ -1305,20 +1305,3 @@ type Store struct {
 }
 ```
 
-
-
-genericapiserver.APIGroupInfo，
-PrioritizedVersions 提前注册的scheme已经有该group支持的version
-VersionedResourcesStorageMap是该group下，version->resource->storage关系，storage封装了各种resource的增删查改细节，跟后端存储有关
-apiGroupInfo := genericapiserver.APIGroupInfo{
-		PrioritizedVersions:          legacyscheme.Scheme.PrioritizedVersionsForGroup(""),
-		VersionedResourcesStorageMap: map[string]map[string]rest.Storage{},
-		Scheme:                       legacyscheme.Scheme,
-		ParameterCodec:               legacyscheme.ParameterCodec,
-		NegotiatedSerializer:         legacyscheme.Codecs,
-	}
-	
-	
-// if EncodingVersion is empty, then the apiserver does not
-		// need to register this resource via the storage version API,
-		// thus we can remove it.
