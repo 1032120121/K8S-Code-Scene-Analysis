@@ -1,26 +1,6 @@
-
 ApiServer中一个资源变更请求要经历的完整流程主要包括认证(Authentication)，授权(Autoritation), 审计（Audit）, 准入（Admission）,GVK转换，对象持久化
 
-注入插件的配置
---enable-admission-plugins=NamespaceLifecycle,LimitRanger ...
---disable-admission-plugins=PodNodeSelector,AlwaysDeny ...
-
-TODO：三个apiserver的关系
-
-gvk转换
-```Golang
-
-KubeAPIServer
-	encodeVersioner := runtime.NewMultiGroupVersioner(
-		opts.StorageVersion,
-		schema.GroupKind{Group: opts.StorageVersion.Group},
-		schema.GroupKind{Group: opts.MemoryVersion.Group},
-	)
-APIExtensionsServer
-etcdOptions.StorageConfig.EncodeVersioner = runtime.NewMultiGroupVersioner(v1beta1.SchemeGroupVersion, schema.GroupKind{Group: v1beta1.GroupName})
-```
-
-# 实现
+# 关键实现
 为了完整分析一个Server的请求处理流程，先忽略Server链中另外的ApiExtensionsServer和AggregatorServer。下面只以普通的KubeApiserver为例
 ## 构建服务配置
 目标是构建配置核心结构GenericAPIServer的genericapiserver.Config对象，它包含了整个server处理流程中的主要结构
