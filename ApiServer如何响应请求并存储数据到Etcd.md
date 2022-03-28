@@ -1,5 +1,9 @@
 ApiServer中一个资源变更请求要经历的完整流程主要包括认证(Authentication)，授权(Autoritation), 审计（Audit）, 准入（Admission）,GVK转换，对象持久化
 
+注入插件的配置
+--enable-admission-plugins=NamespaceLifecycle,LimitRanger ...
+--disable-admission-plugins=PodNodeSelector,AlwaysDeny ...
+
 # 关键实现
 为了完整分析一个Server的请求处理流程，先忽略Server链中另外的ApiExtensionsServer和AggregatorServer。下面只以普通的KubeApiserver为例
 ## 构建服务配置
