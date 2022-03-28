@@ -919,7 +919,7 @@ func (d director) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 **k8s的API分三种**：
 1. core API（又称legacy API）:路径是/api/v1
 2. named group API:路径是/apis/${GROUP}/${VERSION}
-3. discovery API(待验证):针对1和2，路径分别是/api和/apis/${GROUP} 
+3. discovery API(待验证):针对1和2，路径分别是/api/${GROUP} 和/apis/${GROUP} 
 4. others API:路径是/metrics,/healthz,/version,/(根路径),/debug等
 </br>
 
@@ -1016,6 +1016,7 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 }
 ```
 
+先说安装legacy API
 ```Golang
 // InstallLegacyAPI will install the legacy APIs for the restStorageProviders if they are enabled.
 func (m *Instance) InstallLegacyAPI(c *completedConfig, restOptionsGetter generic.RESTOptionsGetter, legacyRESTStorageProvider corerest.LegacyRESTStorageProvider) error {
@@ -1218,6 +1219,93 @@ func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storag
 	return &apiResource, resourceInfo, nil
 }
 ```
+
+普通group API和legacy API安装流程基本一致，除了APIGroupPrefix是/apis，以及实现了RESTStorageProvider接口的各个待安装的group之外，最终都在同一个函数installAPIResources中完成。
+```Golang
+// RESTStorageProvider is a factory type for REST storage.
+type RESTStorageProvider interface {
+	GroupName() string
+	NewRESTStorage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) (genericapiserver.APIGroupInfo, bool, error)
+}
+```
+
+NewRESTStorage是用来初始化APIGroupInfo的。APIGroupInfo包含了对每个Group可以持久化的version，以及不同resource的storage结构。
+两个关键的字段如下，其中VersionedResourcesStorageMap中的storage包含每个resource具体的REST和StatusREST对象
+
+```Golang
+// Info about an API group.
+type APIGroupInfo struct {
+        // 该group对应的version
+	PrioritizedVersions []schema.GroupVersion
+	// 该grouo下针对某version+某resource对应的storage
+	// Info about the resources in this group. It's a map from version to resource to the storage.
+	VersionedResourcesStorageMap map[string]map[string]rest.Storage
+	// XXX 
+}
+```
+
+以daemonset的NewRESTStorage为例，NewREST一般返回REST和StatusREST结构，初始化VersionedResourcesStorageMap对象。
+```
+	// daemonsets
+	daemonSetStorage, daemonSetStatusStorage, err := daemonsetstore.NewREST(restOptionsGetter)
+	if err != nil {
+		return storage, err
+	}
+	storage["daemonsets"] = daemonSetStorage
+	storage["daemonsets/status"] = daemonSetStatusStorage
+```
+
+REST和StatusREST内部都是Store结构。它初始化了不同resource的具体strategy，按照统一的流程处理数据读写。
+```
+// REST implements a RESTStorage for DaemonSets
+type REST struct {
+	*genericregistry.Store
+	//XXX
+}
+
+// StatusREST implements the REST endpoint for changing the status of a daemonset
+type StatusREST struct {
+	store *genericregistry.Store
+}
+
+type Store struct {
+	// XXX
+	
+	// CreateStrategy implements resource-specific behavior during creation.
+	CreateStrategy rest.RESTCreateStrategy
+	// BeginCreate is an optional hook that returns a "transaction-like"
+	// commit/revert function which will be called at the end of the operation,
+	// but before AfterCreate and Decorator, indicating via the argument
+	// whether the operation succeeded.  If this returns an error, the function
+	// is not called.  Almost nobody should use this hook.
+	BeginCreate BeginCreateFunc
+	// AfterCreate implements a further operation to run after a resource is
+	// created and before it is decorated, optional.
+	AfterCreate AfterCreateFunc
+
+	// UpdateStrategy implements resource-specific behavior during updates.
+	UpdateStrategy rest.RESTUpdateStrategy
+	// BeginUpdate is an optional hook that returns a "transaction-like"
+	// commit/revert function which will be called at the end of the operation,
+	// but before AfterUpdate and Decorator, indicating via the argument
+	// whether the operation succeeded.  If this returns an error, the function
+	// is not called.  Almost nobody should use this hook.
+	BeginUpdate BeginUpdateFunc
+	// AfterUpdate implements a further operation to run after a resource is
+	// updated and before it is decorated, optional.
+	AfterUpdate AfterUpdateFunc
+
+	// DeleteStrategy implements resource-specific behavior during deletion.
+	DeleteStrategy rest.RESTDeleteStrategy
+	// AfterDelete implements a further operation to run after a resource is
+	// deleted and before it is decorated, optional.
+	AfterDelete AfterDeleteFunc
+	
+	// XXX
+}
+```
+
+
 
 genericapiserver.APIGroupInfo，
 PrioritizedVersions 提前注册的scheme已经有该group支持的version
