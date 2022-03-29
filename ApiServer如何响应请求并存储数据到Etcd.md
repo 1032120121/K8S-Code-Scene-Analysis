@@ -1214,7 +1214,7 @@ type RESTStorageProvider interface {
 ```
 
 NewRESTStorage是用来初始化APIGroupInfo的。APIGroupInfo包含了对每个Group可以持久化的version，以及不同resource的storage结构。
-两个关键的字段如下，其中VersionedResourcesStorageMap中的storage接口就是每个resource具体的REST和StatusREST对象实现
+两个关键的字段如下，其中VersionedResourcesStorageMap中的storage接口就是每个要变更的resource的具体实现。结构一般有REST、StatusREST、ScaleREST等，每个resource及其subresource的实现都不同。
 
 ```Golang
 // Info about an API group.
@@ -1228,7 +1228,7 @@ type APIGroupInfo struct {
 }
 ```
 
-以daemonset的NewRESTStorage为例，NewREST一般返回REST和StatusREST结构，初始化VersionedResourcesStorageMap对象。
+以daemonset的NewRESTStorage为例，NewREST返回了deamonset可变更的resource：REST和StatusREST两个结构，初始化VersionedResourcesStorageMap对象。
 ```
 	// daemonsets
 	daemonSetStorage, daemonSetStatusStorage, err := daemonsetstore.NewREST(restOptionsGetter)
