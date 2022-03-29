@@ -1106,7 +1106,7 @@ func (a *APIInstaller) Install() ([]metav1.APIResource, []*storageversion.Resour
 func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storage, ws *restful.WebService) (*metav1.APIResource, *storageversion.ResourceInfo, error) {
         // XX
 	
-	// resource有可能带着subresource
+	// resource有可能带着subresource，每个subresoruce独立安装自己的API
 	resource, subresource, err := splitSubresource(path)
 	// XXX
 	
